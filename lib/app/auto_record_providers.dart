@@ -99,7 +99,7 @@ final autoRecordRulesProvider =
     );
 
 /// What one logged check outcome was about.
-enum AutoRecordLogKind { reserved, conflict, error }
+enum AutoRecordLogKind { reserved, conflict, error, ruleDisabled }
 
 /// One line of the check log: what a check did (or
 /// failed to do) about one programme on one unit.
@@ -214,21 +214,38 @@ class AutoRecordRunSummary {
   bool get didAnything => reserved > 0 || conflicts > 0 || errors > 0;
 }
 
+/// A minute-of-day as `H:MM`, for the rule text's
+/// time-of-day window.
+String _minuteOfDayLabel(int minute) =>
+    '${minute ~/ 60}:${(minute % 60).toString().padLeft(2, '0')}';
+
 /// A rule in words, for the log and the rules list:
-/// the keyword, the genre label, or both.
+/// the positive conditions first, then the channel,
+/// the exclusions, the time-of-day window and the
+/// one-shot mode, so a stored rule reads in full.
 String autoRecordRuleText(AutoRecordRule rule) {
   final parts = [
     if (rule.keyword.trim().isNotEmpty) 'キーワード「${rule.keyword.trim()}」',
     if (rule.genreLevel1 != null)
       'ジャンル「${epgGenreLabel(rule.genreLevel1) ?? rule.genreLevel1}」',
+    if (rule.channel != null) 'チャンネル「${rule.channel!.name}」',
+    for (final word in rule.excludeKeywords) '除外「$word」',
+    if (rule.hasTimeRange)
+      '時間帯「${_minuteOfDayLabel(rule.startMinuteOfDay!)}'
+          '〜${_minuteOfDayLabel(rule.endMinuteOfDay!)}」',
+    if (rule.onceOnly) '1回だけ',
   ];
   return parts.isEmpty ? '条件なし' : parts.join('・');
 }
 
 /// Runs one auto record check (user-fork addition):
-/// for every registered nasne, plan the enabled rules
+/// for every registered nasne — one at a time, in
+/// registration order — plan the enabled rules
 /// against the held guide and the unit's reservations,
-/// then create what the plan reserved.
+/// then create what the plan reserved. With two
+/// units, a programme reserved on one is a duplicate
+/// on the other, never a second reservation; conflict
+/// judgement stays per unit (see [AutoRecordChecker.run]).
 ///
 /// The device stays the source of truth: each planned
 /// reservation is conflict-checked against the unit
@@ -263,13 +280,43 @@ class AutoRecordChecker {
     var conflicts = 0;
     var errors = 0;
     final logEntries = <AutoRecordLogEntry>[];
+    // The units are checked one at a time, in
+    // registration order (owner request 2026-11-27):
+    // a programme reserved on an earlier unit — before
+    // the check or by it — is a duplicate on the later
+    // ones, never a second reservation, while the
+    // earlier unit's tuner time is not a conflict
+    // there, so a same-time different programme can
+    // still land on the second unit. [workingRules]
+    // is the rule list as the check leaves it: a
+    // one-shot rule an earlier unit fired is already
+    // off for the later ones.
+    var workingRules = rules;
+    final crossUnitKeys = <String>{};
     try {
       final registrations = await _ref.read(registrationsProvider.future);
       for (final reg in registrations) {
-        final outcome = await _runForUnit(reg, rules, logEntries);
+        final outcome = await _runForUnit(
+          reg,
+          workingRules,
+          logEntries,
+          crossUnitKeys,
+        );
         reserved += outcome.reserved;
         conflicts += outcome.conflicts;
         errors += outcome.errors;
+        crossUnitKeys.addAll(outcome.reservedKeys);
+        if (outcome.spentOnceRuleIds.isNotEmpty) {
+          final notifier = _ref.read(autoRecordRulesProvider.notifier);
+          for (final id in outcome.spentOnceRuleIds) {
+            await notifier.setEnabled(id, false);
+          }
+          final spent = outcome.spentOnceRuleIds.toSet();
+          workingRules = [
+            for (final rule in workingRules)
+              spent.contains(rule.id) ? rule.copyWith(enabled: false) : rule,
+          ];
+        }
       }
     } catch (_) {
       errors++;
@@ -284,14 +331,31 @@ class AutoRecordChecker {
     );
   }
 
-  Future<({int reserved, int conflicts, int errors})> _runForUnit(
+  /// The outcome of one unit's check: the tallies,
+  /// the programme keys this unit holds reserved
+  /// afterwards (its own list plus what this check
+  /// created — the next unit's duplicate set), and
+  /// the one-shot rules this unit fired (the caller
+  /// switches them off before the next unit's turn).
+  Future<
+    ({
+      int reserved,
+      int conflicts,
+      int errors,
+      Set<String> reservedKeys,
+      List<String> spentOnceRuleIds,
+    })
+  >
+  _runForUnit(
     RegisteredNasne reg,
     List<AutoRecordRule> rules,
     List<AutoRecordLogEntry> logEntries,
+    Set<String> externalReservedKeys,
   ) async {
     var reserved = 0;
     var conflicts = 0;
     var errors = 0;
+    final spentOnceRuleIds = <String>[];
     final now = DateTime.now();
 
     void log(AutoRecordLogKind kind, EpgSearchHit? hit, AutoRecordRule? rule) {
@@ -326,21 +390,44 @@ class AutoRecordChecker {
         // other band's check.
       }
     }
-    if (hits.isEmpty) return (reserved: 0, conflicts: 0, errors: 0);
+    if (hits.isEmpty) {
+      return (
+        reserved: 0,
+        conflicts: 0,
+        errors: 0,
+        reservedKeys: <String>{},
+        spentOnceRuleIds: const <String>[],
+      );
+    }
 
     final List<RecordSchedule> existing;
     try {
       existing = await _ref.read(schedulesProvider(reg).future);
     } catch (_) {
       log(AutoRecordLogKind.error, null, null);
-      return (reserved: 0, conflicts: 0, errors: 1);
+      return (
+        reserved: 0,
+        conflicts: 0,
+        errors: 1,
+        reservedKeys: <String>{},
+        spentOnceRuleIds: const <String>[],
+      );
     }
+    final unitKeys = <String>{
+      for (final s in existing)
+        autoRecordProgrammeKey(
+          broadcastingType: s.channel.broadcastingType,
+          serviceId: s.channel.serviceId,
+          start: s.start,
+        ),
+    };
 
     final plan = planAutoRecord(
       rules: rules,
       hits: hits,
       existing: existing,
       now: now,
+      externalReservedKeys: externalReservedKeys,
     );
     conflicts += plan.skips
         .where((s) => s.reason == AutoRecordSkipReason.conflict)
@@ -380,14 +467,35 @@ class AutoRecordChecker {
         await services.schedules.createSchedule(candidate);
         createdAny = true;
         reserved++;
+        unitKeys.add(
+          autoRecordProgrammeKey(
+            broadcastingType: channel.broadcastingType,
+            serviceId: channel.serviceId,
+            start: event.start,
+          ),
+        );
         log(AutoRecordLogKind.reserved, hit, rules[action.ruleIndex]);
+        // A one-shot rule that just fired is spent:
+        // the caller switches it off (and logs say it
+        // happened, on the programme that spent it).
+        final rule = rules[action.ruleIndex];
+        if (rule.onceOnly && !spentOnceRuleIds.contains(rule.id)) {
+          spentOnceRuleIds.add(rule.id);
+          log(AutoRecordLogKind.ruleDisabled, hit, rule);
+        }
       } catch (_) {
         errors++;
         log(AutoRecordLogKind.error, hit, rules[action.ruleIndex]);
       }
     }
     if (createdAny) _ref.invalidate(schedulesProvider(reg));
-    return (reserved: reserved, conflicts: conflicts, errors: errors);
+    return (
+      reserved: reserved,
+      conflicts: conflicts,
+      errors: errors,
+      reservedKeys: unitKeys,
+      spentOnceRuleIds: spentOnceRuleIds,
+    );
   }
 }
 

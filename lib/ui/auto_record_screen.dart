@@ -10,6 +10,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../app/auto_record_providers.dart';
+import '../app/bs_epg_providers.dart';
+import '../app/cs_epg_providers.dart';
+import '../app/state.dart';
+import '../core/core.dart';
 import 'auto_record_policy.dart';
 import 'epg_genre.dart';
 import 'format.dart';
@@ -145,6 +149,8 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
                   AutoRecordLogKind.reserved => Icons.check_circle_outline,
                   AutoRecordLogKind.conflict => Icons.event_busy,
                   AutoRecordLogKind.error => Icons.error_outline,
+                  AutoRecordLogKind.ruleDisabled =>
+                    Icons.do_not_disturb_on_outlined,
                 }),
                 title: Text(
                   entry.title.isEmpty ? '（タイトルなし）' : entry.title,
@@ -156,6 +162,7 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
                     AutoRecordLogKind.reserved => '予約しました',
                     AutoRecordLogKind.conflict => '競合で見送り',
                     AutoRecordLogKind.error => 'エラー',
+                    AutoRecordLogKind.ruleDisabled => '1回だけのためルールを無効化',
                   }}'
                   ' ・ ${entry.channelName}'
                   ' ・ ${formatDateTimeWithWeekdayJst(entry.start)}'
@@ -169,11 +176,14 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
   }
 }
 
-/// One rule's editor: a title keyword, a genre, or
-/// both. Saving an existing rule keeps its place in
-/// the priority order; deleting removes it outright
-/// (reservations it already made stay — they are the
-/// unit's, not the rule's).
+/// One rule's editor: the positive conditions (a
+/// keyword, a genre, or both), the refinements on
+/// top of them (one channel, exclusion keywords, a
+/// time-of-day window) and the repeat mode. Saving
+/// an existing rule keeps its place in the priority
+/// order; deleting removes it outright (reservations
+/// it already made stay — they are the unit's, not
+/// the rule's).
 class AutoRecordRuleEditScreen extends ConsumerStatefulWidget {
   const AutoRecordRuleEditScreen({super.key, this.rule});
 
@@ -190,12 +200,93 @@ class _AutoRecordRuleEditScreenState
   late final TextEditingController _keyword = TextEditingController(
     text: widget.rule?.keyword ?? '',
   );
+  late final TextEditingController _exclude = TextEditingController(
+    text: widget.rule?.excludeKeywords.join('、') ?? '',
+  );
   late int? _genre = widget.rule?.genreLevel1;
+  late AutoRecordChannel? _channel = widget.rule?.channel;
+  late bool _onceOnly = widget.rule?.onceOnly ?? false;
+  late int? _startMinute = widget.rule?.startMinuteOfDay;
+  late int? _endMinute = widget.rule?.endMinuteOfDay;
 
   @override
   void dispose() {
     _keyword.dispose();
+    _exclude.dispose();
     super.dispose();
+  }
+
+  /// The channels the editor can offer: every service
+  /// of every registered unit's three guides, merged
+  /// by service triple, in band / channel-number
+  /// order. Guides that have not landed yet simply
+  /// contribute nothing yet.
+  List<AutoRecordChannel> _guideChannels() {
+    final registrations =
+        ref.watch(registrationsProvider).value ?? const <RegisteredNasne>[];
+    final seen = <(int, int, int), Channel>{};
+    for (final reg in registrations) {
+      for (final provider in [
+        epgGuideProvider(reg),
+        bsEpgGuideProvider(reg),
+        csEpgGuideProvider(reg),
+      ]) {
+        final guide = ref.watch(provider).value;
+        if (guide == null) continue;
+        for (final service in guide.services) {
+          final ch = service.channel;
+          seen.putIfAbsent(
+            (ch.networkId, ch.transportStreamId, ch.serviceId),
+            () => ch,
+          );
+        }
+      }
+    }
+    final channels = seen.values.toList()..sort((a, b) {
+      final byBand = a.broadcastingType.compareTo(b.broadcastingType);
+      if (byBand != 0) return byBand;
+      final byNumber = a.channelNumber.compareTo(b.channelNumber);
+      return byNumber != 0 ? byNumber : a.serviceId.compareTo(b.serviceId);
+    });
+    return [
+      for (final ch in channels)
+        AutoRecordChannel(
+          networkId: ch.networkId,
+          transportStreamId: ch.transportStreamId,
+          serviceId: ch.serviceId,
+          name: ch.serviceName,
+        ),
+    ];
+  }
+
+  /// The exclusion field's contents as a keyword
+  /// list: split on 、, commas and newlines, trimmed,
+  /// blanks and repeats dropped.
+  List<String> _excludeList() {
+    final out = <String>[];
+    for (final part in _exclude.text.split(RegExp(r'[、,\n]'))) {
+      final word = part.trim();
+      if (word.isNotEmpty && !out.contains(word)) out.add(word);
+    }
+    return out;
+  }
+
+  Future<void> _pickTime({required bool start}) async {
+    final current = start ? _startMinute : _endMinute;
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: current == null
+          ? const TimeOfDay(hour: 19, minute: 0)
+          : TimeOfDay(hour: current ~/ 60, minute: current % 60),
+    );
+    if (picked == null) return;
+    setState(() {
+      if (start) {
+        _startMinute = picked.hour * 60 + picked.minute;
+      } else {
+        _endMinute = picked.hour * 60 + picked.minute;
+      }
+    });
   }
 
   Future<void> _save() async {
@@ -204,25 +295,33 @@ class _AutoRecordRuleEditScreenState
       showSnack(context, 'キーワードかジャンルのどちらかを入力してください');
       return;
     }
+    if ((_startMinute == null) != (_endMinute == null)) {
+      showSnack(context, '時間帯は開始と終了の両方を選んでください');
+      return;
+    }
+    if (_startMinute != null && _startMinute == _endMinute) {
+      showSnack(context, '時間帯の開始と終了が同じ時刻です');
+      return;
+    }
     final notifier = ref.read(autoRecordRulesProvider.notifier);
     final existing = widget.rule;
+    AutoRecordRule build(String id, bool enabled) => AutoRecordRule(
+      id: id,
+      keyword: keyword,
+      genreLevel1: _genre,
+      channel: _channel,
+      excludeKeywords: _excludeList(),
+      startMinuteOfDay: _startMinute,
+      endMinuteOfDay: _endMinute,
+      onceOnly: _onceOnly,
+      enabled: enabled,
+    );
     if (existing == null) {
       await notifier.add(
-        AutoRecordRule(
-          id: DateTime.now().microsecondsSinceEpoch.toString(),
-          keyword: keyword,
-          genreLevel1: _genre,
-        ),
+        build(DateTime.now().microsecondsSinceEpoch.toString(), true),
       );
     } else {
-      await notifier.update(
-        AutoRecordRule(
-          id: existing.id,
-          keyword: keyword,
-          genreLevel1: _genre,
-          enabled: existing.enabled,
-        ),
-      );
+      await notifier.update(build(existing.id, existing.enabled));
     }
     if (mounted) Navigator.pop(context);
   }
@@ -235,6 +334,12 @@ class _AutoRecordRuleEditScreenState
   @override
   Widget build(BuildContext context) {
     final editing = widget.rule != null;
+    final channelOptions = _guideChannels();
+    // The rule's own channel stays selectable even
+    // when the guides no longer list it.
+    if (_channel != null && !channelOptions.contains(_channel)) {
+      channelOptions.insert(0, _channel!);
+    }
     return Scaffold(
       appBar: AppBar(title: Text(editing ? 'ルールを編集' : 'ルールを追加')),
       body: ListView(
@@ -265,8 +370,103 @@ class _AutoRecordRuleEditScreenState
             ],
             onChanged: (value) => setState(() => _genre = value),
           ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<AutoRecordChannel?>(
+            initialValue: _channel,
+            decoration: const InputDecoration(
+              labelText: 'チャンネル',
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              const DropdownMenuItem<AutoRecordChannel?>(
+                value: null,
+                child: Text('指定なし'),
+              ),
+              for (final option in channelOptions)
+                DropdownMenuItem<AutoRecordChannel?>(
+                  value: option,
+                  child: Text(option.name),
+                ),
+            ],
+            onChanged: (value) => setState(() => _channel = value),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _exclude,
+            minLines: 1,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              labelText: '除外キーワード',
+              hintText: '例：再放送、総集編',
+              helperText: '「、」で区切って複数指定できます',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          InputDecorator(
+            decoration: const InputDecoration(
+              labelText: '時間帯（番組の開始時刻）',
+              border: OutlineInputBorder(),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => _pickTime(start: true),
+                    child: Text(
+                      _startMinute == null
+                          ? '開始：指定なし'
+                          : '開始：${_timeLabel(_startMinute!)}',
+                    ),
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 8),
+                  child: Text('〜'),
+                ),
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => _pickTime(start: false),
+                    child: Text(
+                      _endMinute == null
+                          ? '終了：指定なし'
+                          : '終了：${_timeLabel(_endMinute!)}',
+                    ),
+                  ),
+                ),
+                if (_startMinute != null || _endMinute != null)
+                  IconButton(
+                    tooltip: '時間帯を解除',
+                    icon: const Icon(Icons.clear),
+                    onPressed: () => setState(() {
+                      _startMinute = null;
+                      _endMinute = null;
+                    }),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<bool>(
+            initialValue: _onceOnly,
+            decoration: const InputDecoration(
+              labelText: '繰り返し',
+              border: OutlineInputBorder(),
+            ),
+            items: const [
+              DropdownMenuItem<bool>(value: false, child: Text('毎週録画')),
+              DropdownMenuItem<bool>(value: true, child: Text('1回だけ')),
+            ],
+            onChanged: (value) => setState(() => _onceOnly = value ?? false),
+          ),
           const SizedBox(height: 8),
-          const Text('キーワードとジャンルの両方を指定すると、両方に合う番組だけが対象になります。'),
+          const Text(
+            'キーワードとジャンルの両方を指定すると、両方に合う番組だけが対象になります。'
+            'チャンネル・時間帯も同じく、すべてに合う番組だけが対象です。'
+            '除外キーワードを含む番組は、条件に合っても録画しません。'
+            '時間帯は開始時刻ちょうどを含み、終了時刻ちょうどは含みません。'
+            '「1回だけ」は、予約できたら自動でルールを無効にします。',
+          ),
           const SizedBox(height: 24),
           FilledButton(onPressed: _save, child: const Text('保存')),
           if (editing) ...[
@@ -277,4 +477,8 @@ class _AutoRecordRuleEditScreenState
       ),
     );
   }
+
+  /// A minute-of-day as `H:MM`, for the time pickers.
+  String _timeLabel(int minute) =>
+      '${minute ~/ 60}:${(minute % 60).toString().padLeft(2, '0')}';
 }

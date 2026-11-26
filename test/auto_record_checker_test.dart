@@ -118,6 +118,7 @@ void main() {
   const rule = AutoRecordRule(id: 'r1', keyword: 'アニメ');
 
   late _FakeSchedules schedules;
+  late List<_FakeSchedules> twoUnitSchedules;
   late InMemoryKeyValueStore keyValues;
 
   EpgGuide guide() {
@@ -220,6 +221,206 @@ void main() {
     // must arrive at the created reservation by itself.
     expect(await container.read(schedulesProvider(reg).future), hasLength(1));
     expect(seen.last, hasLength(1));
+  });
+
+  // ---- Two units and one-shot rules (owner request
+  // 2026-11-27) ----
+
+  const reg2 = RegisteredNasne(
+    host: '192.0.2.11',
+    udn: 'uuid:test-2',
+    friendlyName: 'nasne 2',
+    macAddr: '00:11:22:33:44:66',
+  );
+  const channel2 = Channel(
+    broadcastingType: 2,
+    networkId: 1,
+    transportStreamId: 2,
+    serviceId: 200,
+    serviceType: 1,
+    channelNumber: 2,
+    serviceName: 'テスト放送２',
+  );
+
+  /// A guide holding [events] on the two test
+  /// channels, grouped per channel.
+  EpgGuide guideWith(List<(Channel, DateTime, String, int)> events) {
+    final byChannel = <Channel, List<EpgEvent>>{};
+    for (final (channel, start, title, eventId) in events) {
+      byChannel.putIfAbsent(channel, () => []).add(
+        EpgEvent(
+          eventId: eventId,
+          start: start,
+          duration: const Duration(minutes: 60),
+          title: title,
+        ),
+      );
+    }
+    return EpgGuide(
+      broadcastingType: 2,
+      services: [
+        for (final entry in byChannel.entries)
+          EpgServiceGuide(channel: entry.key, events: entry.value),
+      ],
+    );
+  }
+
+  /// A container with two registered units, each with
+  /// its own fake schedule service and its own guide.
+  ProviderContainer makeTwoUnitContainer({
+    required EpgGuide guide1,
+    required EpgGuide guide2,
+  }) {
+    keyValues = InMemoryKeyValueStore();
+    final schedules1 = _FakeSchedules();
+    final schedules2 = _FakeSchedules();
+    twoUnitSchedules = [schedules1, schedules2];
+    DeviceServices bundleFor(_FakeSchedules s) => DeviceServices(
+      deviceInfo: _StubDeviceInfo(),
+      settings: _StubSettings(),
+      schedules: s,
+      titles: _StubTitles(),
+      metadata: _StubMetadata(),
+      live: _StubLive(),
+      playback: const UnsupportedPlaybackEngine(),
+    );
+    final bundles = {_reg.host: bundleFor(schedules1), reg2.host: bundleFor(schedules2)};
+    final guides = {_reg.host: guide1, reg2.host: guide2};
+    return ProviderContainer(
+      overrides: [
+        registrationStoreProvider.overrideWithValue(
+          InMemoryRegistrationStore(const [_reg, reg2]),
+        ),
+        keyValueStoreProvider.overrideWithValue(keyValues),
+        deviceServicesProvider.overrideWith((ref, reg) => bundles[reg.host]!),
+        epgGuideProvider.overrideWith((ref, reg) async => guides[reg.host]!),
+        bsEpgGuideProvider.overrideWith(
+          (ref, reg) async => const EpgGuide(broadcastingType: 3, services: []),
+        ),
+        csEpgGuideProvider.overrideWith(
+          (ref, reg) async => const EpgGuide(broadcastingType: 4, services: []),
+        ),
+      ],
+    );
+  }
+
+  test('two units: the same programme is reserved only on the first', () async {
+    final start = DateTime.now().add(const Duration(days: 1));
+    final guide = guideWith([(_channel, start, 'アニメ番組', 42)]);
+    final container = makeTwoUnitContainer(guide1: guide, guide2: guide);
+    addTearDown(container.dispose);
+    await seedRules();
+    final summary = await container.read(autoRecordCheckerProvider).run();
+    expect(summary.reserved, 1);
+    expect(twoUnitSchedules[0].created, hasLength(1));
+    expect(twoUnitSchedules[1].created, isEmpty);
+  });
+
+  test('two units: same-time programmes split across the units', () async {
+    final start = DateTime.now().add(const Duration(days: 1));
+    final guide = guideWith([
+      (_channel, start, 'アニメ番組１', 42),
+      (channel2, start.add(const Duration(minutes: 30)), 'アニメ番組２', 43),
+    ]);
+    final container = makeTwoUnitContainer(guide1: guide, guide2: guide);
+    addTearDown(container.dispose);
+    await seedRules();
+    final summary = await container.read(autoRecordCheckerProvider).run();
+    // Unit 1 takes the first programme (the second
+    // overlaps it there); unit 2 takes the second —
+    // the first is a duplicate there, and unit 1's
+    // tuner time is not unit 2's conflict.
+    expect(summary.reserved, 2);
+    expect(twoUnitSchedules[0].created, hasLength(1));
+    expect(twoUnitSchedules[0].created.single.channel.serviceId, 100);
+    expect(twoUnitSchedules[1].created, hasLength(1));
+    expect(twoUnitSchedules[1].created.single.channel.serviceId, 200);
+  });
+
+  test('two units: a programme already on unit 1 is not doubled on unit 2', () async {
+    final start = DateTime.now().add(const Duration(days: 1));
+    final guide = guideWith([(_channel, start, 'アニメ番組', 42)]);
+    final container = makeTwoUnitContainer(guide1: guide, guide2: guide);
+    addTearDown(container.dispose);
+    // Unit 1 already holds the programme (reserved by
+    // hand before the check).
+    twoUnitSchedules[0].items.add(
+      RecordSchedule(
+        id: 'manual-1',
+        start: start,
+        durationSeconds: 3600,
+        conditionId: '1',
+        channel: const ScheduleChannel(
+          broadcastingType: 2,
+          channelType: 2,
+          serviceId: 100,
+        ),
+        desiredQualityMode: 100,
+        desiredMatchingId: '',
+        reservationCreatorId: '2000',
+        priorityFlag: 0,
+        recordDestinationId: 'HDD',
+      ),
+    );
+    await seedRules();
+    final summary = await container.read(autoRecordCheckerProvider).run();
+    expect(summary.reserved, 0);
+    expect(twoUnitSchedules[0].created, isEmpty);
+    expect(twoUnitSchedules[1].created, isEmpty);
+  });
+
+  test('a one-shot rule reserves once, switches off, and logs it', () async {
+    final start = DateTime.now().add(const Duration(days: 1));
+    final container = makeContainer(
+      terrestrialGuide: guideWith([
+        (_channel, start, 'アニメ番組１', 42),
+        (_channel, start.add(const Duration(hours: 2)), 'アニメ番組２', 43),
+      ]),
+    );
+    addTearDown(container.dispose);
+    await keyValues.write(
+      'auto_record_rules',
+      encodeAutoRecordRules(const [
+        AutoRecordRule(id: 'once1', keyword: 'アニメ', onceOnly: true),
+      ]),
+    );
+    final summary = await container.read(autoRecordCheckerProvider).run();
+    expect(summary.reserved, 1);
+    expect(schedules.created, hasLength(1));
+    expect(schedules.created.single.start, start);
+    final rules = container.read(autoRecordRulesProvider);
+    expect(rules.single.enabled, isFalse);
+    final log = container.read(autoRecordLogProvider);
+    expect(
+      log.map((e) => e.kind),
+      containsAll(<AutoRecordLogKind>[
+        AutoRecordLogKind.reserved,
+        AutoRecordLogKind.ruleDisabled,
+      ]),
+    );
+    // A second check with the spent rule reserves
+    // nothing more.
+    final again = await container.read(autoRecordCheckerProvider).run();
+    expect(again.reserved, 0);
+    expect(schedules.created, hasLength(1));
+  });
+
+  test('two units: a one-shot rule fires on the first unit only', () async {
+    final start = DateTime.now().add(const Duration(days: 1));
+    final guide = guideWith([(_channel, start, 'アニメ番組', 42)]);
+    final container = makeTwoUnitContainer(guide1: guide, guide2: guide);
+    addTearDown(container.dispose);
+    await keyValues.write(
+      'auto_record_rules',
+      encodeAutoRecordRules(const [
+        AutoRecordRule(id: 'once1', keyword: 'アニメ', onceOnly: true),
+      ]),
+    );
+    final summary = await container.read(autoRecordCheckerProvider).run();
+    expect(summary.reserved, 1);
+    expect(twoUnitSchedules[0].created, hasLength(1));
+    expect(twoUnitSchedules[1].created, isEmpty);
+    expect(container.read(autoRecordRulesProvider).single.enabled, isFalse);
   });
 
   test('a CS guide hit is reserved with its CS channel', () async {
