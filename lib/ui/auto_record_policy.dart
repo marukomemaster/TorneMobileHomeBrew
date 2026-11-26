@@ -110,6 +110,7 @@ class AutoRecordRule {
     this.startMinuteOfDay,
     this.endMinuteOfDay,
     this.onceOnly = false,
+    this.qualityMode,
     this.enabled = true,
   });
 
@@ -170,6 +171,19 @@ class AutoRecordRule {
   /// it on to try again next time.
   final bool onceOnly;
 
+  /// The recording quality the rule's reservations
+  /// are created with (owner request 2026-11-27): an
+  /// XSRS desiredQualityMode value, or null for no
+  /// specification, which keeps the create model's
+  /// own default (100 = DR) — the behaviour before
+  /// the choice existed. Only the measured torne
+  /// values are ever stored (100 = DR, 230 = 3倍,
+  /// plan 28; see qualityModeLabel): the editor
+  /// offers exactly those, and the stored form reads
+  /// any other value as no specification, so an
+  /// unmeasured mode never reaches the wire.
+  final int? qualityMode;
+
   /// Off rules are kept but never planned.
   final bool enabled;
 
@@ -186,6 +200,7 @@ class AutoRecordRule {
     int? startMinuteOfDay,
     int? endMinuteOfDay,
     bool? onceOnly,
+    int? qualityMode,
     bool? enabled,
   }) {
     return AutoRecordRule(
@@ -197,6 +212,7 @@ class AutoRecordRule {
       startMinuteOfDay: startMinuteOfDay ?? this.startMinuteOfDay,
       endMinuteOfDay: endMinuteOfDay ?? this.endMinuteOfDay,
       onceOnly: onceOnly ?? this.onceOnly,
+      qualityMode: qualityMode ?? this.qualityMode,
       enabled: enabled ?? this.enabled,
     );
   }
@@ -210,6 +226,7 @@ class AutoRecordRule {
     if (hasTimeRange) 'startMinute': startMinuteOfDay,
     if (hasTimeRange) 'endMinute': endMinuteOfDay,
     if (onceOnly) 'once': true,
+    if (qualityMode != null) 'quality': qualityMode,
     'enabled': enabled,
   };
 
@@ -238,9 +255,18 @@ class AutoRecordRule {
       // Rules stored before one-shot mode have no
       // 'once' key and read as the standing mode.
       onceOnly: value['once'] == true,
+      qualityMode: _parseQualityMode(value['quality']),
       enabled: enabled is bool ? enabled : true,
     );
   }
+
+  /// The stored recording quality: only the measured
+  /// torne modes (100 = DR, 230 = 3倍, plan 28) are
+  /// honoured; anything else — including rules stored
+  /// before the choice existed — reads as no
+  /// specification.
+  static int? _parseQualityMode(Object? value) =>
+      value is int && (value == 100 || value == 230) ? value : null;
 
   /// The stored time-of-day window as [start, end]:
   /// both bounds count only when both are stored as

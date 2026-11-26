@@ -9,8 +9,24 @@
 /// search entry point (epg_search_screen), which searches the
 /// same held dataset by keyword and genre; its results open
 /// the shared event detail dialog ([showEpgEventDetail]).
+///
+/// A right click (desktop) or a long press (touch) on an
+/// event tile opens that programme's menu — 録画 —
+/// reserving it without the trip through the detail
+/// dialog (owner request 2026-11-27). The menu is the
+/// search results' row menu's kin: an observing pointer
+/// listener over the tile, a right click answered at once
+/// and a touch hold timed from the same listener, and
+/// showMenu at the press point. The reservation runs the
+/// shared guide-event create (see recordGuideEvent) and
+/// reports its outcome with that path's wording. A
+/// programme that has already ended offers no menu at
+/// all: the detail dialog offers it no reservation
+/// either, and there is nothing else for the menu to
+/// carry.
 library;
 
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -30,6 +46,7 @@ import 'epg_search_screen.dart';
 import 'error_messages.dart';
 import 'format.dart';
 import 'live_screen.dart';
+import 'player_record_policy.dart';
 import 'schedule_form.dart';
 import 'epg_subchannel_visibility.dart';
 import 'tv_focus.dart';
@@ -397,6 +414,26 @@ class _EpgScreenState extends ConsumerState<EpgScreen> {
   static DateTime _jstDayStart(DateTime jstDate) =>
       jstDate.subtract(const Duration(hours: 9));
 
+  /// Reserves a guide tile's programme from its menu:
+  /// the shared guide-event create (see recordGuideEvent),
+  /// with the outcome reported in that path's wording —
+  /// the same feedback the search results' row menu and
+  /// the live player's record action give.
+  Future<void> _recordEvent(
+    RegisteredNasne reg,
+    Channel channel,
+    EpgEvent event,
+  ) async {
+    final result = await recordGuideEvent(
+      ref: ref,
+      reg: reg,
+      channel: channel,
+      event: event,
+    );
+    if (!mounted) return;
+    showSnack(context, liveRecordResultMessage(result));
+  }
+
   @override
   Widget build(BuildContext context) {
     final reg = ref.watch(selectedRegistrationProvider);
@@ -516,6 +553,8 @@ class _EpgScreenState extends ConsumerState<EpgScreen> {
               ),
               onDeleteReserved: (schedule) =>
                   deleteScheduleAndInvalidate(ref, reg, schedule),
+              onRecordEvent: (channel, event) =>
+                  _recordEvent(reg, channel, event),
               logos: logos,
               selectedDay: _selectedDay,
               onSelectDay: (day) => setState(() {
@@ -543,6 +582,7 @@ class _GuideView extends StatelessWidget {
     required this.hiddenGenres,
     required this.onWatchEvent,
     required this.onDeleteReserved,
+    required this.onRecordEvent,
     required this.logos,
     required this.selectedDay,
     required this.onSelectDay,
@@ -570,6 +610,11 @@ class _GuideView extends StatelessWidget {
   /// Deletes the reservation covering a guide event
   /// (plan 124); wired by the screen to the device.
   final Future<void> Function(RecordSchedule schedule) onDeleteReserved;
+
+  /// Reserves a guide event from its tile's menu (owner
+  /// request 2026-11-27); wired by the screen to the
+  /// shared guide-event create.
+  final void Function(Channel channel, EpgEvent event) onRecordEvent;
   final Map<int, List<int>> logos;
   final DateTime? selectedDay;
   final ValueChanged<DateTime> onSelectDay;
@@ -659,6 +704,7 @@ class _GuideView extends StatelessWidget {
                             hiddenGenres: hiddenGenres,
                             onWatchEvent: onWatchEvent,
                             onDeleteReserved: onDeleteReserved,
+                            onRecordEvent: onRecordEvent,
                             dayStart: dayStart,
                             dayEnd: dayEnd,
                             controller: bodyController,
@@ -803,6 +849,7 @@ class _DayGrid extends StatelessWidget {
     required this.hiddenGenres,
     required this.onWatchEvent,
     required this.onDeleteReserved,
+    required this.onRecordEvent,
     required this.dayStart,
     required this.dayEnd,
     required this.controller,
@@ -817,6 +864,11 @@ class _DayGrid extends StatelessWidget {
   /// Deletes the reservation covering a guide event
   /// (plan 124); wired by the screen to the device.
   final Future<void> Function(RecordSchedule schedule) onDeleteReserved;
+
+  /// Reserves a guide event from its tile's menu (owner
+  /// request 2026-11-27); wired by the screen to the
+  /// shared guide-event create.
+  final void Function(Channel channel, EpgEvent event) onRecordEvent;
   final DateTime dayStart;
   final DateTime dayEnd;
   final ScrollController controller;
@@ -880,6 +932,8 @@ class _DayGrid extends StatelessWidget {
                               event,
                             ),
                             onDeleteReserved: onDeleteReserved,
+                            onRecord: () =>
+                                onRecordEvent(services[i].channel, event),
                             onWatch: () => onWatchEvent(services[i].channel),
                           ),
                       ],
@@ -901,7 +955,28 @@ class _DayGrid extends StatelessWidget {
   }
 }
 
-class _EventTile extends StatelessWidget {
+/// One event's tile in the day grid.
+///
+/// A right click (desktop) or a long press (touch) on the
+/// tile opens the programme's menu — 録画 — reserving it
+/// without the trip through the detail dialog (owner
+/// request 2026-11-27). The arrangement is the search
+/// results' row menu's (see _SearchHitRow in
+/// epg_search_screen.dart): an observing pointer listener
+/// over the tile — it never takes the event, so the
+/// tile's tap and the grid's pan scroll keep every pointer
+/// event they already handle — a right click answered at
+/// once, and a touch hold timed from the same listener,
+/// never a gesture recogniser, so the hold is not
+/// competed for. One consequence of not competing: the
+/// tile's tap still lands when the held finger lifts, so
+/// a hold that opened the menu swallows the tap that
+/// follows it — that tap would open the detail dialog
+/// over the menu. A programme that has already ended
+/// opens no menu (see the library note), so its hold
+/// swallows nothing and the tap tail opens the detail,
+/// as a plain tap does.
+class _EventTile extends StatefulWidget {
   const _EventTile({
     super.key,
     required this.event,
@@ -913,6 +988,7 @@ class _EventTile extends StatelessWidget {
     required this.reserved,
     required this.reservedSchedule,
     required this.onDeleteReserved,
+    required this.onRecord,
     required this.onWatch,
   });
 
@@ -943,13 +1019,152 @@ class _EventTile extends StatelessWidget {
   /// Deletes [reservedSchedule] on the device (plan 124).
   final Future<void> Function(RecordSchedule schedule) onDeleteReserved;
 
+  /// Reserves this tile's programme from its menu: the
+  /// screen's own record run (its feedback lives there).
+  final VoidCallback onRecord;
+
   /// Opens live viewing for this tile's channel (plan 95);
   /// the detail dialog offers it only while the event is on
   /// air.
   final VoidCallback onWatch;
 
   @override
+  State<_EventTile> createState() => _EventTileState();
+}
+
+class _EventTileState extends State<_EventTile> {
+  Timer? _longPressTimer;
+  int? _longPressPointer;
+  Offset? _longPressStart;
+
+  /// The last hold opened the menu: the tap the finger's
+  /// lift still delivers is that hold's tail, not a tap
+  /// on the tile, and is swallowed once. A fresh press
+  /// clears a leftover — a menu dismissed from its
+  /// barrier never delivers the tap, and the next press
+  /// on the tile is a new gesture, not that hold's tail.
+  bool _swallowNextTap = false;
+
+  @override
+  void dispose() {
+    _longPressTimer?.cancel();
+    super.dispose();
+  }
+
+  /// A right click (a secondary mouse button press) on
+  /// the tile opens the programme's menu at the press
+  /// point. A touch press starts the hold the long press
+  /// is timed from, the same pair of arrangements as the
+  /// search results' listener.
+  void _onTilePointerDown(PointerDownEvent event) {
+    if ((event.buttons & kSecondaryMouseButton) != 0) {
+      unawaited(_showEventMenu(event.position));
+      return;
+    }
+    if ((event.buttons & kPrimaryButton) != 0) {
+      _swallowNextTap = false;
+      if (event.kind == PointerDeviceKind.touch) {
+        _longPressPointer = event.pointer;
+        _longPressStart = event.position;
+        _longPressTimer?.cancel();
+        _longPressTimer = Timer(kLongPressTimeout, _onTileLongPressFired);
+      }
+    }
+  }
+
+  /// The held touch reached the long-press timeout still
+  /// down: open the menu where the press began.
+  void _onTileLongPressFired() {
+    _longPressTimer = null;
+    final start = _longPressStart;
+    _longPressPointer = null;
+    _longPressStart = null;
+    if (start != null && mounted) {
+      unawaited(_showEventMenu(start));
+    }
+  }
+
+  /// Ends a tracked hold without opening the menu: the
+  /// finger lifted or the press was cancelled before the
+  /// timeout.
+  void _onTilePointerEnd(PointerEvent event) {
+    if (event.pointer != _longPressPointer) return;
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
+    _longPressPointer = null;
+    _longPressStart = null;
+  }
+
+  /// A tracked press that wanders past the touch slop is
+  /// a pan of the grid, not a hold: it stops being a long
+  /// press.
+  void _onTilePointerMove(PointerMoveEvent event) {
+    if (event.pointer != _longPressPointer) return;
+    final start = _longPressStart;
+    if (start != null && (event.position - start).distance > kTouchSlop) {
+      _onTilePointerEnd(event);
+    }
+  }
+
+  /// The programme's menu at [position], the search
+  /// menu's shape: showMenu over a zero-size rect at the
+  /// press point. A programme that has already ended has
+  /// nothing to offer — the detail dialog offers it no
+  /// reservation either — so no menu opens, and nothing
+  /// is swallowed: a hold's tap tail goes on to open the
+  /// detail, as a plain tap does. When the menu does
+  /// open, the tap tail is swallowed first, so it cannot
+  /// open the detail over the menu.
+  Future<void> _showEventMenu(Offset position) async {
+    if (!widget.event.end.isAfter(DateTime.now())) return;
+    _swallowNextTap = true;
+    final overlay = Overlay.of(context).context.findRenderObject()!;
+    final chosen = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(position.dx, position.dy, 0, 0),
+        Offset.zero & (overlay as RenderBox).size,
+      ),
+      items: [
+        PopupMenuItem<String>(
+          value: 'record',
+          child: Row(
+            children: [
+              const Icon(Icons.fiber_manual_record, size: 18),
+              const SizedBox(width: 8),
+              const Text('録画'),
+            ],
+          ),
+        ),
+      ],
+    );
+    if (chosen != 'record' || !mounted) return;
+    widget.onRecord();
+  }
+
+  void _handleTap() {
+    if (_swallowNextTap) {
+      _swallowNextTap = false;
+      return;
+    }
+    showEpgEventDetail(
+      context,
+      reg: widget.reg,
+      channel: widget.channel,
+      channelName: widget.channelName,
+      event: widget.event,
+      onWatch: widget.onWatch,
+      reservedSchedule: widget.reservedSchedule,
+      onDeleteReserved: widget.onDeleteReserved,
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final event = widget.event;
+    final dayStart = widget.dayStart;
+    final suppressed = widget.suppressed;
+    final reserved = widget.reserved;
     final theme = Theme.of(context);
     final startMin = math.max(0, event.start.difference(dayStart).inMinutes);
     final endMin = math.min(24 * 60, event.end.difference(dayStart).inMinutes);
@@ -970,93 +1185,94 @@ class _EventTile extends StatelessWidget {
       left: 1,
       right: 1,
       height: height.toDouble(),
-      child: Container(
-        // The reserved frame (plan 120) is a foreground
-        // decoration: it paints over the tile's edge and
-        // leaves the genre tint inside untouched.
-        foregroundDecoration: epgReservedFrame(reserved),
-        child: Material(
-          // Tiles are tinted by the event's genre (plan 86,
-          // plan 85 item 10); events without a known genre
-          // keep the neutral colour they have always had.
-          // A suppressed genre (plan 95) paints the plain
-          // surface instead, with no text below.
-          color: suppressed
-              ? theme.colorScheme.surface
-              : epgGenreTileColor(
-                  genreLevel1: event.genreLevel1,
-                  surface: theme.colorScheme.surface,
-                  fallback: theme.colorScheme.surfaceContainerHighest,
-                ),
-          borderRadius: BorderRadius.circular(3),
-          // Tiles too short for their text must not paint outside
-          // their box: spilled glyphs used to bleed into the tile
-          // below and get half-covered there (plan 22).
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(3),
-            onTap: () => showEpgEventDetail(
-              context,
-              reg: reg,
-              channel: channel,
-              channelName: channelName,
-              event: event,
-              onWatch: onWatch,
-              reservedSchedule: reservedSchedule,
-              onDeleteReserved: onDeleteReserved,
-            ),
-            child: suppressed
-                ? const SizedBox.expand()
-                : maxTitleLines >= 1
-                ? Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 4,
-                      vertical: 2,
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(timeText, style: timeStyle),
-                        if (title != null)
-                          Expanded(
-                            child: Text(
-                              title,
-                              style: theme.textTheme.bodySmall,
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: maxTitleLines.clamp(1, 4),
-                            ),
-                          ),
-                      ],
-                    ),
-                  )
-                : Padding(
-                    // Compact form for tiles too short for two lines:
-                    // time and title share one small line.
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Text(
-                          timeText,
-                          style: timeStyle?.copyWith(fontSize: 10, height: 1.1),
-                        ),
-                        if (title != null) ...[
-                          const SizedBox(width: 4),
-                          Expanded(
-                            child: Text(
-                              title,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                fontSize: 10,
-                                height: 1.1,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: _onTilePointerDown,
+        onPointerMove: _onTilePointerMove,
+        onPointerUp: _onTilePointerEnd,
+        onPointerCancel: _onTilePointerEnd,
+        child: Container(
+          // The reserved frame (plan 120) is a foreground
+          // decoration: it paints over the tile's edge and
+          // leaves the genre tint inside untouched.
+          foregroundDecoration: epgReservedFrame(reserved),
+          child: Material(
+            // Tiles are tinted by the event's genre (plan 86,
+            // plan 85 item 10); events without a known genre
+            // keep the neutral colour they have always had.
+            // A suppressed genre (plan 95) paints the plain
+            // surface instead, with no text below.
+            color: suppressed
+                ? theme.colorScheme.surface
+                : epgGenreTileColor(
+                    genreLevel1: event.genreLevel1,
+                    surface: theme.colorScheme.surface,
+                    fallback: theme.colorScheme.surfaceContainerHighest,
                   ),
+            borderRadius: BorderRadius.circular(3),
+            // Tiles too short for their text must not paint outside
+            // their box: spilled glyphs used to bleed into the tile
+            // below and get half-covered there (plan 22).
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(3),
+              onTap: _handleTap,
+              child: suppressed
+                  ? const SizedBox.expand()
+                  : maxTitleLines >= 1
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 2,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(timeText, style: timeStyle),
+                          if (title != null)
+                            Expanded(
+                              child: Text(
+                                title,
+                                style: theme.textTheme.bodySmall,
+                                overflow: TextOverflow.ellipsis,
+                                maxLines: maxTitleLines.clamp(1, 4),
+                              ),
+                            ),
+                        ],
+                      ),
+                    )
+                  : Padding(
+                      // Compact form for tiles too short for two lines:
+                      // time and title share one small line.
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Text(
+                            timeText,
+                            style: timeStyle?.copyWith(
+                              fontSize: 10,
+                              height: 1.1,
+                            ),
+                          ),
+                          if (title != null) ...[
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                title,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  fontSize: 10,
+                                  height: 1.1,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+            ),
           ),
         ),
       ),

@@ -188,6 +188,29 @@ void main() {
     expect(schedules.created.length, 1);
   });
 
+  test('a rule quality choice reaches the created reservation', () async {
+    final container = makeContainer();
+    addTearDown(container.dispose);
+    await keyValues.write(
+      'auto_record_rules',
+      encodeAutoRecordRules(const [
+        AutoRecordRule(id: 'r1', keyword: 'アニメ', qualityMode: 230),
+      ]),
+    );
+    final summary = await container.read(autoRecordCheckerProvider).run();
+    expect(summary.reserved, 1);
+    expect(schedules.created.single.desiredQualityMode, 230);
+  });
+
+  test('no quality choice keeps the create default', () async {
+    final container = makeContainer();
+    addTearDown(container.dispose);
+    await seedRules();
+    final summary = await container.read(autoRecordCheckerProvider).run();
+    expect(summary.reserved, 1);
+    expect(schedules.created.single.desiredQualityMode, 100);
+  });
+
   test('a check refreshes the reservation list the UI watches', () async {
     final container = makeContainer();
     addTearDown(container.dispose);

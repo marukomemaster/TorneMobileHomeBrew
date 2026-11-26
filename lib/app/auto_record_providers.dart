@@ -18,6 +18,7 @@ import '../core/core.dart';
 import '../ui/auto_record_policy.dart';
 import '../ui/epg_genre.dart';
 import '../ui/epg_search.dart';
+import '../ui/format.dart';
 import 'bs_epg_providers.dart';
 import 'cs_epg_providers.dart';
 import 'providers.dart';
@@ -234,6 +235,7 @@ String autoRecordRuleText(AutoRecordRule rule) {
       '時間帯「${_minuteOfDayLabel(rule.startMinuteOfDay!)}'
           '〜${_minuteOfDayLabel(rule.endMinuteOfDay!)}」',
     if (rule.onceOnly) '1回だけ',
+    if (rule.qualityMode != null) '画質「${qualityModeLabel(rule.qualityMode!)}」',
   ];
   return parts.isEmpty ? '条件なし' : parts.join('・');
 }
@@ -444,6 +446,7 @@ class AutoRecordChecker {
       final hit = action.hit;
       final event = hit.event;
       final channel = hit.channel;
+      final rule = rules[action.ruleIndex];
       final candidate = NewRecordSchedule(
         start: event.start,
         durationSeconds: event.duration.inSeconds,
@@ -454,6 +457,11 @@ class AutoRecordChecker {
         ),
         networkId: channel.networkId,
         eventId: event.eventId,
+        // The rule's quality choice, when it makes
+        // one; no specification keeps the create
+        // model's own default (100 = DR), as before
+        // the choice existed.
+        desiredQualityMode: rule.qualityMode ?? 100,
       );
       try {
         final deviceConflicts = await services.schedules.checkConflicts(
@@ -478,7 +486,6 @@ class AutoRecordChecker {
         // A one-shot rule that just fired is spent:
         // the caller switches it off (and logs say it
         // happened, on the programme that spent it).
-        final rule = rules[action.ruleIndex];
         if (rule.onceOnly && !spentOnceRuleIds.contains(rule.id)) {
           spentOnceRuleIds.add(rule.id);
           log(AutoRecordLogKind.ruleDisabled, hit, rule);

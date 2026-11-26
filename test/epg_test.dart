@@ -8,9 +8,9 @@ library;
 
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -1568,4 +1568,238 @@ void main() {
       expect(find.widgetWithText(FilledButton, '視聴'), findsOneWidget);
     });
   });
+
+  group('guide tile menu (owner request 2026-11-27)', () {
+    const reg = RegisteredNasne(
+      host: '192.0.2.1',
+      udn: 'uuid:test',
+      friendlyName: 'nasne',
+      macAddr: '00:11:22:33:44:55',
+    );
+
+    EpgGuide tileGuide(EpgEvent event) => EpgGuide(
+      broadcastingType: 2,
+      services: [
+        EpgServiceGuide(channel: _channel, events: [event]),
+      ],
+    );
+
+    Widget tileHost(_TileMenuFakeSchedules schedules, EpgGuide guide) {
+      final bundle = DeviceServices(
+        deviceInfo: _TileMenuStubDeviceInfo(),
+        settings: _TileMenuStubSettings(),
+        schedules: schedules,
+        titles: _TileMenuStubTitles(),
+        metadata: _TileMenuStubMetadata(),
+        live: _TileMenuStubLive(),
+        playback: const UnsupportedPlaybackEngine(),
+      );
+      return ProviderScope(
+        overrides: [
+          registrationStoreProvider.overrideWithValue(
+            InMemoryRegistrationStore(const [reg]),
+          ),
+          epgGuideProvider.overrideWith((ref, r) async => guide),
+          channelLogosProvider.overrideWith(
+            (ref, r) async => const <int, List<int>>{},
+          ),
+          deviceServicesProvider.overrideWith((ref, r) => bundle),
+        ],
+        child: const MaterialApp(home: EpgScreen()),
+      );
+    }
+
+    Future<void> pumpGuide(WidgetTester tester, Widget host) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(host);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    testWidgets('a long press on a tile opens its menu, and 録画 '
+        'reserves the programme through the shared create', (tester) async {
+      final schedules = _TileMenuFakeSchedules();
+      final start = DateTime.now().add(const Duration(minutes: 30));
+      await pumpGuide(
+        tester,
+        tileHost(
+          schedules,
+          tileGuide(
+            EpgEvent(
+              eventId: 1,
+              start: start,
+              duration: const Duration(minutes: 30),
+              title: 'これからの番組',
+            ),
+          ),
+        ),
+      );
+      expect(find.text('これからの番組'), findsOneWidget);
+
+      await tester.longPress(find.text('これからの番組'));
+      await tester.pumpAndSettle();
+
+      // The menu alone: the hold neither opened the detail
+      // dialog (its tap is swallowed) nor reserved yet.
+      expect(find.text('録画'), findsOneWidget);
+      expect(find.text('録画予約'), findsNothing);
+      expect(schedules.created, isEmpty);
+
+      await tester.tap(find.text('録画'));
+      await tester.pumpAndSettle();
+
+      // The candidate the guide's own creation path builds:
+      // the event's start, length and id, on its channel.
+      expect(schedules.created, hasLength(1));
+      final created = schedules.created.single;
+      expect(created.eventId, 1);
+      expect(created.channel.serviceId, 0x3333);
+      expect(created.durationSeconds, 30 * 60);
+      expect(find.text('予約を作成しました'), findsOneWidget);
+    });
+
+    testWidgets('a right click on a tile opens its menu', (tester) async {
+      final schedules = _TileMenuFakeSchedules();
+      final start = DateTime.now().add(const Duration(minutes: 30));
+      await pumpGuide(
+        tester,
+        tileHost(
+          schedules,
+          tileGuide(
+            EpgEvent(
+              eventId: 1,
+              start: start,
+              duration: const Duration(minutes: 30),
+              title: 'これからの番組',
+            ),
+          ),
+        ),
+      );
+
+      final tile = find.text('これからの番組');
+      final gesture = await tester.startGesture(
+        tester.getCenter(tile),
+        kind: PointerDeviceKind.mouse,
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(find.text('録画'), findsOneWidget);
+      // A right click is not a tap: no detail dialog.
+      expect(find.text('録画予約'), findsNothing);
+
+      await tester.tap(find.text('録画'));
+      await tester.pumpAndSettle();
+      expect(schedules.created, hasLength(1));
+      expect(find.text('予約を作成しました'), findsOneWidget);
+    });
+
+    testWidgets('a programme that has ended offers no menu; the hold '
+        'goes on to the detail, which offers it no reservation', (
+      tester,
+    ) async {
+      final schedules = _TileMenuFakeSchedules();
+      final start = DateTime.now().subtract(const Duration(minutes: 30));
+      await pumpGuide(
+        tester,
+        tileHost(
+          schedules,
+          tileGuide(
+            EpgEvent(
+              eventId: 1,
+              start: start,
+              duration: const Duration(minutes: 15),
+              title: '終わった番組',
+            ),
+          ),
+        ),
+      );
+      expect(find.text('終わった番組'), findsOneWidget);
+
+      await tester.longPress(find.text('終わった番組'));
+      await tester.pumpAndSettle();
+
+      // No menu item anywhere, and nothing reserved; the
+      // hold's tap tail opened the detail dialog, whose
+      // only action for an ended programme is closing.
+      expect(find.text('録画'), findsNothing);
+      expect(find.text('録画予約'), findsNothing);
+      expect(find.text('閉じる'), findsOneWidget);
+      expect(schedules.created, isEmpty);
+      await tester.tap(find.text('閉じる'));
+      await tester.pumpAndSettle();
+    });
+  });
+}
+
+/// The schedules service behind the guide tile menu tests:
+/// records what the shared create was asked to make, and
+/// answers the conflict check with no conflicts.
+class _TileMenuFakeSchedules implements ScheduleService {
+  final List<RecordSchedule> items = [];
+  final List<NewRecordSchedule> created = [];
+
+  @override
+  Future<List<RecordSchedule>> listSchedules({
+    int startingIndex = 0,
+    int requestedCount = 50,
+  }) async => [...items];
+
+  @override
+  Future<String> createSchedule(NewRecordSchedule schedule) async {
+    created.add(schedule);
+    return '900';
+  }
+
+  @override
+  Future<void> updateSchedule(ScheduleUpdate update) async {}
+
+  @override
+  Future<void> deleteSchedule(String id) async {}
+
+  @override
+  Future<List<RecordSchedule>> checkConflicts(
+    NewRecordSchedule candidate,
+  ) async => const [];
+}
+
+/// A service the tile menu never calls; any call is a test
+/// bug, so it throws.
+class _TileMenuUnused {
+  static Never call(Invocation invocation) =>
+      throw UnimplementedError('unused fake: $invocation');
+}
+
+class _TileMenuStubDeviceInfo implements DeviceInfoService {
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      _TileMenuUnused.call(invocation);
+}
+
+class _TileMenuStubSettings implements SettingsService {
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      _TileMenuUnused.call(invocation);
+}
+
+class _TileMenuStubTitles implements TitleCatalogService {
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      _TileMenuUnused.call(invocation);
+}
+
+class _TileMenuStubMetadata implements MetadataService {
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      _TileMenuUnused.call(invocation);
+}
+
+class _TileMenuStubLive implements LiveCatalogService {
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      _TileMenuUnused.call(invocation);
 }

@@ -179,7 +179,8 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
 /// One rule's editor: the positive conditions (a
 /// keyword, a genre, or both), the refinements on
 /// top of them (one channel, exclusion keywords, a
-/// time-of-day window) and the repeat mode. Saving
+/// time-of-day window), the repeat mode and the
+/// recording quality. Saving
 /// an existing rule keeps its place in the priority
 /// order; deleting removes it outright (reservations
 /// it already made stay — they are the unit's, not
@@ -206,6 +207,7 @@ class _AutoRecordRuleEditScreenState
   late int? _genre = widget.rule?.genreLevel1;
   late AutoRecordChannel? _channel = widget.rule?.channel;
   late bool _onceOnly = widget.rule?.onceOnly ?? false;
+  late int? _qualityMode = widget.rule?.qualityMode;
   late int? _startMinute = widget.rule?.startMinuteOfDay;
   late int? _endMinute = widget.rule?.endMinuteOfDay;
 
@@ -314,6 +316,7 @@ class _AutoRecordRuleEditScreenState
       startMinuteOfDay: _startMinute,
       endMinuteOfDay: _endMinute,
       onceOnly: _onceOnly,
+      qualityMode: _qualityMode,
       enabled: enabled,
     );
     if (existing == null) {
@@ -459,13 +462,31 @@ class _AutoRecordRuleEditScreenState
             ],
             onChanged: (value) => setState(() => _onceOnly = value ?? false),
           ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<int?>(
+            initialValue: _qualityMode,
+            decoration: const InputDecoration(
+              labelText: '画質モード',
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              const DropdownMenuItem<int?>(value: null, child: Text('指定なし')),
+              for (final mode in const [100, 230])
+                DropdownMenuItem<int?>(
+                  value: mode,
+                  child: Text(qualityModeLabel(mode)),
+                ),
+            ],
+            onChanged: (value) => setState(() => _qualityMode = value),
+          ),
           const SizedBox(height: 8),
           const Text(
             'キーワードとジャンルの両方を指定すると、両方に合う番組だけが対象になります。'
             'チャンネル・時間帯も同じく、すべてに合う番組だけが対象です。'
             '除外キーワードを含む番組は、条件に合っても録画しません。'
             '時間帯は開始時刻ちょうどを含み、終了時刻ちょうどは含みません。'
-            '「1回だけ」は、予約できたら自動でルールを無効にします。',
+            '「1回だけ」は、予約できたら自動でルールを無効にします。'
+            '画質モードを指定しないときは DR で録画します。',
           ),
           const SizedBox(height: 24),
           FilledButton(onPressed: _save, child: const Text('保存')),

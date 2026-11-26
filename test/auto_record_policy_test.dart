@@ -610,6 +610,18 @@ void main() {
       final decoded = decodeAutoRecordRules('[{"id":"a","keyword":"アニメ"}]');
       expect(decoded.single.onceOnly, isFalse);
     });
+
+    test('the JSON form round-trips the quality mode', () {
+      const rules = [AutoRecordRule(id: 'a', keyword: 'アニメ', qualityMode: 230)];
+      final decoded = decodeAutoRecordRules(encodeAutoRecordRules(rules));
+      expect(decoded.single.qualityMode, 230);
+    });
+
+    test('a rule stored before the quality choice reads as '
+        'no specification', () {
+      final decoded = decodeAutoRecordRules('[{"id":"a","keyword":"アニメ"}]');
+      expect(decoded.single.qualityMode, isNull);
+    });
   });
 
   group('two-unit coordination', () {
