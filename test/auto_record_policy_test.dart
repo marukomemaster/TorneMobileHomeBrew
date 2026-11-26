@@ -518,6 +518,106 @@ void main() {
     });
   });
 
+  group('weekday set', () {
+    // Starts are built as JST wall times so the tests
+    // read the same in any host timezone. 2026-11-27
+    // is a Friday, the 28th a Saturday, the 30th a
+    // Monday.
+    DateTime jst(int day, int hour, [int minute = 0]) =>
+        instantFromJstWall(DateTime(2026, 11, day, hour, minute));
+
+    EpgEvent atJst(int day, int hour, [int minute = 0]) => EpgEvent(
+      eventId: 1,
+      start: jst(day, hour, minute),
+      duration: const Duration(minutes: 30),
+      title: 'アニメ番組',
+    );
+
+    const fridays = AutoRecordRule(
+      id: 'a',
+      keyword: 'アニメ',
+      weekdays: {DateTime.friday},
+    );
+
+    test('a start on a named weekday matches, on another does not', () {
+      expect(autoRecordRuleMatches(fridays, atJst(27, 20)), isTrue);
+      expect(autoRecordRuleMatches(fridays, atJst(28, 20)), isFalse);
+      expect(autoRecordRuleMatches(fridays, atJst(30, 20)), isFalse);
+    });
+
+    test('several weekdays can be named', () {
+      const friSat = AutoRecordRule(
+        id: 'a',
+        keyword: 'アニメ',
+        weekdays: {DateTime.friday, DateTime.saturday},
+      );
+      expect(autoRecordRuleMatches(friSat, atJst(27, 20)), isTrue);
+      expect(autoRecordRuleMatches(friSat, atJst(28, 20)), isTrue);
+      expect(autoRecordRuleMatches(friSat, atJst(30, 20)), isFalse);
+    });
+
+    test('no weekdays means every day', () {
+      const everyDay = AutoRecordRule(id: 'a', keyword: 'アニメ');
+      expect(autoRecordRuleMatches(everyDay, atJst(27, 20)), isTrue);
+      expect(autoRecordRuleMatches(everyDay, atJst(30, 20)), isTrue);
+    });
+
+    test('the weekday is judged on the JST wall clock', () {
+      // 01:00 JST on Saturday is still Friday in UTC.
+      expect(
+        autoRecordStartOnWeekdays(jst(28, 1), {DateTime.saturday}),
+        isTrue,
+      );
+      expect(autoRecordStartOnWeekdays(jst(28, 1), {DateTime.friday}), isFalse);
+    });
+
+    test('weekdays and a time-of-day range combine as an AND', () {
+      const fridayEvenings = AutoRecordRule(
+        id: 'a',
+        keyword: 'アニメ',
+        weekdays: {DateTime.friday},
+        startMinuteOfDay: 19 * 60,
+        endMinuteOfDay: 22 * 60,
+      );
+      expect(autoRecordRuleMatches(fridayEvenings, atJst(27, 20)), isTrue);
+      expect(autoRecordRuleMatches(fridayEvenings, atJst(27, 23)), isFalse);
+      expect(autoRecordRuleMatches(fridayEvenings, atJst(28, 20)), isFalse);
+    });
+
+    test('weekdays alone do not configure a rule', () {
+      const onlyWeekdays = AutoRecordRule(id: 'a', weekdays: {DateTime.friday});
+      expect(onlyWeekdays.isConfigured, isFalse);
+      expect(autoRecordRuleMatches(onlyWeekdays, atJst(27, 20)), isFalse);
+    });
+
+    test('the JSON form round-trips the weekday set', () {
+      const rules = [
+        AutoRecordRule(
+          id: 'a',
+          keyword: 'アニメ',
+          weekdays: {DateTime.friday, DateTime.monday},
+        ),
+      ];
+      expect(encodeAutoRecordRules(rules), contains('"weekdays":[1,5]'));
+      final decoded = decodeAutoRecordRules(encodeAutoRecordRules(rules));
+      expect(decoded.single.weekdays, {DateTime.monday, DateTime.friday});
+      expect(decoded.single.hasWeekdays, isTrue);
+    });
+
+    test('a rule stored before weekdays reads as every day', () {
+      final decoded = decodeAutoRecordRules('[{"id":"a","keyword":"アニメ"}]');
+      expect(decoded.single.hasWeekdays, isFalse);
+      expect(autoRecordRuleMatches(decoded.single, atJst(30, 20)), isTrue);
+    });
+
+    test('stored values that are not weekdays are dropped', () {
+      final decoded = decodeAutoRecordRules(
+        '[{"id":"a","keyword":"アニメ","weekdays":[0,8,"x",5,5]}]',
+      );
+      expect(decoded.single.weekdays, {DateTime.friday});
+    });
+  });
+
   group('one-shot rules', () {
     const onceRule = AutoRecordRule(id: 'a', keyword: 'アニメ', onceOnly: true);
 

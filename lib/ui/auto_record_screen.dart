@@ -179,8 +179,8 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
 /// One rule's editor: the positive conditions (a
 /// keyword, a genre, or both), the refinements on
 /// top of them (one channel, exclusion keywords, a
-/// time-of-day window), the repeat mode and the
-/// recording quality. Saving
+/// time-of-day window, a weekday set), the repeat
+/// mode and the recording quality. Saving
 /// an existing rule keeps its place in the priority
 /// order; deleting removes it outright (reservations
 /// it already made stay — they are the unit's, not
@@ -210,6 +210,7 @@ class _AutoRecordRuleEditScreenState
   late int? _qualityMode = widget.rule?.qualityMode;
   late int? _startMinute = widget.rule?.startMinuteOfDay;
   late int? _endMinute = widget.rule?.endMinuteOfDay;
+  late final Set<int> _weekdays = {...(widget.rule?.weekdays ?? const <int>{})};
 
   @override
   void dispose() {
@@ -315,6 +316,7 @@ class _AutoRecordRuleEditScreenState
       excludeKeywords: _excludeList(),
       startMinuteOfDay: _startMinute,
       endMinuteOfDay: _endMinute,
+      weekdays: _weekdays,
       onceOnly: _onceOnly,
       qualityMode: _qualityMode,
       enabled: enabled,
@@ -450,6 +452,31 @@ class _AutoRecordRuleEditScreenState
             ),
           ),
           const SizedBox(height: 16),
+          InputDecorator(
+            decoration: const InputDecoration(
+              labelText: '曜日（番組の開始曜日）',
+              border: OutlineInputBorder(),
+            ),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (var day = 1; day <= 7; day++)
+                  FilterChip(
+                    label: Text('月火水木金土日'[day - 1]),
+                    selected: _weekdays.contains(day),
+                    onSelected: (value) => setState(() {
+                      if (value) {
+                        _weekdays.add(day);
+                      } else {
+                        _weekdays.remove(day);
+                      }
+                    }),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
           DropdownButtonFormField<bool>(
             initialValue: _onceOnly,
             decoration: const InputDecoration(
@@ -482,7 +509,8 @@ class _AutoRecordRuleEditScreenState
           const SizedBox(height: 8),
           const Text(
             'キーワードとジャンルの両方を指定すると、両方に合う番組だけが対象になります。'
-            'チャンネル・時間帯も同じく、すべてに合う番組だけが対象です。'
+            'チャンネル・曜日・時間帯も同じく、すべてに合う番組だけが対象です。'
+            '曜日を何も選ばないときは、毎日が対象です。'
             '除外キーワードを含む番組は、条件に合っても録画しません。'
             '時間帯は開始時刻ちょうどを含み、終了時刻ちょうどは含みません。'
             '「1回だけ」は、予約できたら自動でルールを無効にします。'

@@ -109,6 +109,7 @@ class AutoRecordRule {
     this.excludeKeywords = const [],
     this.startMinuteOfDay,
     this.endMinuteOfDay,
+    this.weekdays = const {},
     this.onceOnly = false,
     this.qualityMode,
     this.enabled = true,
@@ -159,6 +160,23 @@ class AutoRecordRule {
   /// Whether the rule names a time-of-day window.
   bool get hasTimeRange => startMinuteOfDay != null && endMinuteOfDay != null;
 
+  /// The weekdays the programme must start on (owner
+  /// request 2026-11-27): DateTime.weekday numbers
+  /// (1 = Monday … 7 = Sunday), judged on the JST
+  /// wall clock of the programme's start, like the
+  /// time-of-day window. Empty means every day. This
+  /// is what stands in for a weekly reservation —
+  /// repeating reservations are the official app's
+  /// to create, not this app's (plan 120) — and,
+  /// like the channel, it is a filter on top of the
+  /// keyword / genre conditions, never a condition
+  /// of its own: a rule with only weekdays is still
+  /// unconfigured (see [isConfigured]).
+  final Set<int> weekdays;
+
+  /// Whether the rule names a weekday set.
+  bool get hasWeekdays => weekdays.isNotEmpty;
+
   /// One-shot mode (owner request 2026-11-27): false
   /// is the standing behaviour — the rule fires on
   /// every check, week after week. True makes the
@@ -199,6 +217,7 @@ class AutoRecordRule {
     List<String>? excludeKeywords,
     int? startMinuteOfDay,
     int? endMinuteOfDay,
+    Set<int>? weekdays,
     bool? onceOnly,
     int? qualityMode,
     bool? enabled,
@@ -211,6 +230,7 @@ class AutoRecordRule {
       excludeKeywords: excludeKeywords ?? this.excludeKeywords,
       startMinuteOfDay: startMinuteOfDay ?? this.startMinuteOfDay,
       endMinuteOfDay: endMinuteOfDay ?? this.endMinuteOfDay,
+      weekdays: weekdays ?? this.weekdays,
       onceOnly: onceOnly ?? this.onceOnly,
       qualityMode: qualityMode ?? this.qualityMode,
       enabled: enabled ?? this.enabled,
@@ -225,6 +245,7 @@ class AutoRecordRule {
     if (excludeKeywords.isNotEmpty) 'exclude': excludeKeywords,
     if (hasTimeRange) 'startMinute': startMinuteOfDay,
     if (hasTimeRange) 'endMinute': endMinuteOfDay,
+    if (hasWeekdays) 'weekdays': weekdays.toList()..sort(),
     if (onceOnly) 'once': true,
     if (qualityMode != null) 'quality': qualityMode,
     'enabled': enabled,
@@ -252,6 +273,7 @@ class AutoRecordRule {
       excludeKeywords: _parseExcludeKeywords(value['exclude']),
       startMinuteOfDay: _parseTimeRange(value)[0],
       endMinuteOfDay: _parseTimeRange(value)[1],
+      weekdays: _parseWeekdays(value['weekdays']),
       // Rules stored before one-shot mode have no
       // 'once' key and read as the standing mode.
       onceOnly: value['once'] == true,
@@ -267,6 +289,19 @@ class AutoRecordRule {
   /// specification.
   static int? _parseQualityMode(Object? value) =>
       value is int && (value == 100 || value == 230) ? value : null;
+
+  /// The stored weekday set: the entries that are
+  /// weekday numbers (1 = Monday … 7 = Sunday, the
+  /// DateTime.weekday convention), repeats dropped.
+  /// Anything else — including rules stored before
+  /// weekdays existed — reads as no restriction.
+  static Set<int> _parseWeekdays(Object? value) {
+    if (value is! List) return const {};
+    return {
+      for (final entry in value)
+        if (entry is int && entry >= 1 && entry <= 7) entry,
+    };
+  }
 
   /// The stored time-of-day window as [start, end]:
   /// both bounds count only when both are stored as
@@ -345,11 +380,23 @@ bool autoRecordStartInTimeRange(
   return false;
 }
 
+/// Whether a programme starting at [start] falls on
+/// one of [weekdays] (1 = Monday … 7 = Sunday, the
+/// DateTime.weekday convention). The judgement is on
+/// the JST wall clock, like the time-of-day window:
+/// a programme starting at 01:00 JST on Saturday is
+/// a Saturday programme, whatever the host's
+/// timezone says.
+bool autoRecordStartOnWeekdays(DateTime start, Set<int> weekdays) =>
+    weekdays.contains(jstWallClock(start).weekday);
+
 /// Whether [rule] claims [event]: the programme must
 /// be on the rule's channel when it names one (the
 /// caller passes the event's [channel]; a pinned rule
 /// never matches without one), the genre must be
-/// the event's when the rule names one, and the
+/// the event's when the rule names one, the start
+/// must fall in the rule's time-of-day window and on
+/// one of its weekdays when it names them, and the
 /// keyword must appear in the programme's own text
 /// when the rule names one. The text set is the
 /// title, the outline (shortText), the programme
@@ -374,6 +421,10 @@ bool autoRecordRuleMatches(AutoRecordRule rule, EpgEvent event, {Channel? channe
         rule.startMinuteOfDay!,
         rule.endMinuteOfDay!,
       )) {
+    return false;
+  }
+  if (rule.hasWeekdays &&
+      !autoRecordStartOnWeekdays(event.start, rule.weekdays)) {
     return false;
   }
   final keyword = rule.keyword.trim().toLowerCase();

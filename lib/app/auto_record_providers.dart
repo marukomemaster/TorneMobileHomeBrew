@@ -220,10 +220,18 @@ class AutoRecordRunSummary {
 String _minuteOfDayLabel(int minute) =>
     '${minute ~/ 60}:${(minute % 60).toString().padLeft(2, '0')}';
 
+/// The rule text's weekday set, in week order:
+/// `金` on its own, `月水金` together.
+String _weekdaysLabel(Set<int> weekdays) => [
+  for (var day = 1; day <= 7; day++)
+    if (weekdays.contains(day)) '月火水木金土日'[day - 1],
+].join();
+
 /// A rule in words, for the log and the rules list:
 /// the positive conditions first, then the channel,
-/// the exclusions, the time-of-day window and the
-/// one-shot mode, so a stored rule reads in full.
+/// the exclusions, the time-of-day window, the
+/// weekday set and the one-shot mode, so a stored
+/// rule reads in full.
 String autoRecordRuleText(AutoRecordRule rule) {
   final parts = [
     if (rule.keyword.trim().isNotEmpty) 'キーワード「${rule.keyword.trim()}」',
@@ -234,6 +242,7 @@ String autoRecordRuleText(AutoRecordRule rule) {
     if (rule.hasTimeRange)
       '時間帯「${_minuteOfDayLabel(rule.startMinuteOfDay!)}'
           '〜${_minuteOfDayLabel(rule.endMinuteOfDay!)}」',
+    if (rule.hasWeekdays) '曜日「${_weekdaysLabel(rule.weekdays)}」',
     if (rule.onceOnly) '1回だけ',
     if (rule.qualityMode != null) '画質「${qualityModeLabel(rule.qualityMode!)}」',
   ];
