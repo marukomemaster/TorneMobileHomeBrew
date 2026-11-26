@@ -185,6 +185,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart' as services;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
@@ -197,6 +198,7 @@ import '../app/providers.dart';
 import '../core/core.dart';
 import 'player_cache_policy.dart';
 import 'player_chapter_policy.dart';
+import 'player_cm_autoskip_policy.dart';
 import 'player_error_policy.dart';
 import 'player_hwdec_policy.dart';
 import 'player_resume_policy.dart';
@@ -419,6 +421,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// bar.
   List<Duration> _chapters = const [];
 
+  /// Whether CM auto skip is on for this playback
+  /// (user-fork addition): a snapshot of
+  /// cmAutoSkipProvider taken in [initState], the same
+  /// snapshot rule as the other player settings, so a
+  /// change in Settings applies from the next playback.
+  bool _cmAutoSkipEnabled = false;
+
+  /// The start of the CM run the viewer seeked into by
+  /// hand during this playback: auto skip leaves that
+  /// run alone (see player_cm_autoskip_policy). Set
+  /// from the position stream when a jump that is not
+  /// an auto skip seek lands inside a run.
+  Duration? _cmSuppressedRunStart;
+
+  /// The target of an auto skip seek still in flight:
+  /// position reports behind it must not retrigger the
+  /// same skip, and its landing must not read as a
+  /// manual seek. Cleared when the position reaches it
+  /// or the seek fails.
+  Duration? _cmAutoSkipPendingTarget;
+
   /// How long playback may take to reach the playing state before
   /// the screen gives up with a timeout error (plan 29). Kept
   /// above mpv's network timeout (plan 30) so mpv's own classified
@@ -527,6 +550,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       unawaited(_kickLegacyMpvAfterInit());
     }
     _hwdecMode = ref.read(videoHwdecModeProvider);
+    _cmAutoSkipEnabled = ref.read(cmAutoSkipProvider);
     _videoController = videoControllerHardwareAcceleration(_hwdecMode)
         ? VideoController(_player)
         : VideoController(
@@ -590,7 +614,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     );
     _subscriptions.add(
       _player.stream.position.listen((position) {
+        final previous = _lastPosition;
         _lastPosition = position;
+        _maybeCmAutoSkip(position, previous);
       }),
     );
     _subscriptions.add(
@@ -826,6 +852,58 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         count: widget.zapTargets!.length,
       ),
     );
+  }
+
+  /// A right click (a secondary mouse button press) on
+  /// the viewing area opens the channel list (user-fork
+  /// addition): the whole band as a menu, where the
+  /// header strip only reaches the neighbouring channels
+  /// and the up / down keys step one at a time. The
+  /// listener only observes — it never takes the event —
+  /// so the controls keep every pointer event they
+  /// already handle, and a press that is not a right
+  /// click, or a screen that cannot zap, passes by
+  /// unnoticed.
+  void _onPlayerPointerDown(PointerDownEvent event) {
+    if ((event.buttons & kSecondaryMouseButton) == 0) return;
+    unawaited(_showZapChannelList(event.position));
+  }
+
+  /// Shows the band's channels as a menu at [position]
+  /// and zaps to the picked one. The channel being
+  /// watched carries the check, the same mark the speed
+  /// and audio menus use; picking it is a no-op through
+  /// [_zapTo], like stepping back onto the same channel.
+  /// Opening the menu puts a route over this screen,
+  /// which also holds the zap keys back until it closes
+  /// (see _onZapKeyEvent). Like the keys, the list stays
+  /// available on the start error, so a channel whose
+  /// start failed can be left this way too.
+  Future<void> _showZapChannelList(Offset position) async {
+    if (!_canZap || _zapping || _opening) return;
+    if (!(ModalRoute.of(context)?.isCurrent ?? false)) return;
+    final targets = widget.zapTargets!;
+    final overlay = Overlay.of(context).context.findRenderObject()!;
+    final selected = await showMenu<int>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(position.dx, position.dy, 0, 0),
+        Offset.zero & (overlay as RenderBox).size,
+      ),
+      items: [
+        for (var i = 0; i < targets.length; i++)
+          CheckedPopupMenuItem<int>(
+            value: i,
+            checked: i == _zapIndex,
+            child: Text(
+              targets[i].name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+      ],
+    );
+    if (selected != null && mounted) _zapTo(selected);
   }
 
   /// Switches playback to the zap target at [index], in
@@ -1101,6 +1179,65 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       await _player.seek(target);
     } catch (e) {
       _diag(DiagCategory.playback, 'player: chapter seek failed: $e');
+    }
+  }
+
+  /// CM auto skip (user-fork addition): on each position
+  /// report, when the setting is on and this is a
+  /// recording with chapter points, ask
+  /// player_cm_autoskip_policy whether the position sits
+  /// in a commercial-break run and seek past it. Runs
+  /// beside playback, never in its way: every guard
+  /// failure is a silent no-op, and a failed seek only
+  /// logs.
+  ///
+  /// A position jump the pending auto skip seek does
+  /// not explain is a manual seek (a chapter button, a
+  /// ±10 s skip, the seek bar): when it lands inside a
+  /// run, that run is suppressed for the rest of this
+  /// playback, so the viewer can rewind into a break
+  /// and watch it without being skipped out of it again.
+  void _maybeCmAutoSkip(Duration position, Duration previous) {
+    if (!_cmAutoSkipEnabled || widget.live || _chapters.isEmpty) return;
+    final duration = _player.state.duration;
+    if (duration <= Duration.zero) return;
+    final pending = _cmAutoSkipPendingTarget;
+    if (pending != null) {
+      if (position < pending) return;
+      _cmAutoSkipPendingTarget = null;
+    } else if ((position - previous).abs() > const Duration(seconds: 2)) {
+      final runStart = cmRunStartAt(
+        chapters: _chapters,
+        position: position,
+        duration: duration,
+      );
+      if (runStart != null) _cmSuppressedRunStart = runStart;
+    }
+    if (!_playingNow || _completed) return;
+    final target = cmAutoSkipTarget(
+      chapters: _chapters,
+      position: position,
+      duration: duration,
+      suppressedRunStart: _cmSuppressedRunStart,
+    );
+    if (target == null) return;
+    _cmAutoSkipPendingTarget = target;
+    _diag(
+      DiagCategory.playback,
+      'player: CM auto skip from ${position.inSeconds}s '
+      'to ${target.inSeconds}s (user-fork addition)',
+    );
+    unawaited(_seekForCmAutoSkip(target));
+  }
+
+  Future<void> _seekForCmAutoSkip(Duration target) async {
+    try {
+      await _player.seek(target);
+    } catch (e) {
+      _diag(DiagCategory.playback, 'player: CM auto skip seek failed: $e');
+      if (_cmAutoSkipPendingTarget == target) {
+        _cmAutoSkipPendingTarget = null;
+      }
     }
   }
 
@@ -1749,73 +1886,80 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             ),
         ],
       ),
-      body: _error != null
-          ? Center(
-              child: SingleChildScrollView(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text('再生を開始できませんでした。', textAlign: TextAlign.center),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'nasne との接続やネットワークの状態を確認して、'
-                        'もう一度お試しください。',
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 8),
-                      // The raw player error (an mpv message, or
-                      // this screen's own timeout wording) is
-                      // diagnostic text, not something a viewer
-                      // can act on: it sits behind the detail
-                      // expander (plan 86, plan 85 item 9), and
-                      // is in the diagnostic log as well.
-                      ExpansionTile(
-                        title: const Text('詳細'),
-                        children: [
-                          Text(
-                            _error!,
-                            textAlign: TextAlign.center,
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            )
-          : Stack(
-              children: [
-                MaterialVideoControlsTheme(
-                  normal: _materialControlsTheme(
-                    fullscreen: false,
-                    bottomViewPadding: bottomViewPadding,
-                  ),
-                  fullscreen: _materialControlsTheme(fullscreen: true),
-                  child: MaterialDesktopVideoControlsTheme(
-                    normal: _desktopControlsTheme(),
-                    fullscreen: _desktopControlsTheme(),
-                    child: Video(
-                      controller: _videoController,
-                      // The stock adaptive controls, with
-                      // the chapter ticks overlaid while
-                      // the title has points (plan 112). The
-                      // TV variant builds its own remote-
-                      // driven controls instead (plan 147).
-                      controls: _tvVariant
-                          ? _tvControls
-                          : _chapters.isEmpty
-                          ? AdaptiveVideoControls
-                          : _controlsWithChapterTicks,
+      body: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: _onPlayerPointerDown,
+        child: _error != null
+            ? Center(
+                child: SingleChildScrollView(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Text(
+                          '再生を開始できませんでした。',
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'nasne との接続やネットワークの状態を確認して、'
+                          'もう一度お試しください。',
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 8),
+                        // The raw player error (an mpv message, or
+                        // this screen's own timeout wording) is
+                        // diagnostic text, not something a viewer
+                        // can act on: it sits behind the detail
+                        // expander (plan 86, plan 85 item 9), and
+                        // is in the diagnostic log as well.
+                        ExpansionTile(
+                          title: const Text('詳細'),
+                          children: [
+                            Text(
+                              _error!,
+                              textAlign: TextAlign.center,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                if (_interrupted) _buildInterruptionBanner(),
-              ],
-            ),
+              )
+            : Stack(
+                children: [
+                  MaterialVideoControlsTheme(
+                    normal: _materialControlsTheme(
+                      fullscreen: false,
+                      bottomViewPadding: bottomViewPadding,
+                    ),
+                    fullscreen: _materialControlsTheme(fullscreen: true),
+                    child: MaterialDesktopVideoControlsTheme(
+                      normal: _desktopControlsTheme(),
+                      fullscreen: _desktopControlsTheme(),
+                      child: Video(
+                        controller: _videoController,
+                        // The stock adaptive controls, with
+                        // the chapter ticks overlaid while
+                        // the title has points (plan 112). The
+                        // TV variant builds its own remote-
+                        // driven controls instead (plan 147).
+                        controls: _tvVariant
+                            ? _tvControls
+                            : _chapters.isEmpty
+                            ? AdaptiveVideoControls
+                            : _controlsWithChapterTicks,
+                      ),
+                    ),
+                  ),
+                  if (_interrupted) _buildInterruptionBanner(),
+                ],
+              ),
+      ),
     );
   }
 

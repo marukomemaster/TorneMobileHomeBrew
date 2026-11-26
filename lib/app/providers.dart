@@ -163,6 +163,38 @@ final showSubchannelsProvider = NotifierProvider<ShowSubchannelsNotifier, bool>(
   ShowSubchannelsNotifier.new,
 );
 
+/// CM auto skip for recorded playback (user-fork
+/// addition): while a recording plays, move past the
+/// chapter segments that look like commercial breaks
+/// without the viewer pressing the chapter buttons
+/// (see ui/player_cm_autoskip_policy.dart for the
+/// classification and its limits). Off unless the
+/// viewer turns it on; persisted in the key-value
+/// store. The player screen snapshots the value as it
+/// opens, so a change applies from the next playback.
+class CmAutoSkipNotifier extends Notifier<bool> {
+  static const _key = 'cm_auto_skip_enabled';
+
+  @override
+  bool build() {
+    final store = ref.watch(keyValueStoreProvider);
+    Future.microtask(() async {
+      final value = await store.read(_key);
+      if (value != null && value == 'true' && !state) state = true;
+    });
+    return false;
+  }
+
+  Future<void> set(bool value) async {
+    state = value;
+    await ref.read(keyValueStoreProvider).write(_key, value ? 'true' : 'false');
+  }
+}
+
+final cmAutoSkipProvider = NotifierProvider<CmAutoSkipNotifier, bool>(
+  CmAutoSkipNotifier.new,
+);
+
 /// Programme-guide genres the viewer does not watch
 /// (Discord request, 2026-11-21): events of these genres
 /// paint blank in the guide grid, so the guide only draws

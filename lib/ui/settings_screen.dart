@@ -10,6 +10,7 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../app/auto_record_providers.dart';
 import '../app/debug_log.dart';
 import '../app/log_export.dart';
 import '../app/log_folder.dart';
@@ -18,6 +19,7 @@ import '../app/providers.dart';
 import '../app/state.dart';
 import '../app/store_directory.dart';
 import '../core/core.dart';
+import 'auto_record_screen.dart';
 import 'dtcp_credential_screen.dart';
 import 'epg_hidden_genres_screen.dart';
 import 'error_messages.dart';
@@ -54,6 +56,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final registrations = ref.watch(registrationsProvider);
     final selected = ref.watch(selectedRegistrationProvider);
     final debugSettings = ref.watch(debugSettingsProvider);
+    final autoRecordRules = ref.watch(autoRecordRulesProvider);
     final storeDir = ref.watch(storeDirectoryProvider);
     return Scaffold(
       appBar: AppBar(title: const Text('設定')),
@@ -257,6 +260,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           // hardware's, and the desktop builds are out of
           // scope (see player_hwdec_policy.dart).
           if (Platform.isAndroid) const VideoHwdecSetting(),
+          SwitchListTile(
+            title: const Text('CM自動スキップ'),
+            subtitle: const Text('録画再生で、短いチャプター区間をCMとみなして自動で飛ばします'),
+            value: ref.watch(cmAutoSkipProvider),
+            onChanged: (value) =>
+                ref.read(cmAutoSkipProvider.notifier).set(value),
+          ),
           const Divider(),
           _sectionTitle(context, '録画再生 (DTCP-IP)'),
           ListTile(
@@ -352,6 +362,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               enabled: !_exportingLogs,
               onTap: _exportingLogs ? null : _exportDebugLogs,
             ),
+          const Divider(),
+          _sectionTitle(context, 'おまかせ録画'),
+          ListTile(
+            title: const Text('おまかせ録画ルール'),
+            subtitle: Text(
+              autoRecordRules.isEmpty
+                  ? 'タイトルやジャンルの条件で自動予約します'
+                  : 'ルール ${autoRecordRules.length} 件',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => const AutoRecordScreen(),
+              ),
+            ),
+          ),
           const Divider(),
           TvFocusAnchor(
             child: Padding(

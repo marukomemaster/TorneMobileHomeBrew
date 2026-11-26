@@ -8,6 +8,7 @@ library;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../app/auto_record_providers.dart';
 import '../app/state.dart';
 import 'epg_screen.dart';
 import 'home_screen.dart';
@@ -35,11 +36,7 @@ class AppShell extends ConsumerWidget {
 
   static const _destinations = [
     (icon: Icons.home_outlined, selectedIcon: Icons.home, label: 'ホーム'),
-    (
-      icon: Icons.live_tv_outlined,
-      selectedIcon: Icons.live_tv,
-      label: 'TV視聴',
-    ),
+    (icon: Icons.live_tv_outlined, selectedIcon: Icons.live_tv, label: 'TV視聴'),
     (
       icon: Icons.event_note_outlined,
       selectedIcon: Icons.event_note,
@@ -61,6 +58,10 @@ class AppShell extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tab = ref.watch(tabIndexProvider);
+    // Fires the auto record startup check once per app
+    // session (user-fork addition; see
+    // app/auto_record_providers.dart).
+    ref.watch(autoRecordStartupProvider);
     final screens = const [
       HomeScreen(),
       LiveScreen(),
