@@ -22,6 +22,7 @@ import '../app/providers.dart';
 import '../app/state.dart';
 import '../app/bs_epg_providers.dart';
 import '../core/core.dart';
+import 'channel_visibility.dart';
 import 'epg_genre.dart';
 import 'epg_reserved.dart';
 import 'epg_search_screen.dart';
@@ -480,9 +481,16 @@ class _EpgScreenState extends ConsumerState<EpgScreen> {
             data: (guide) => _GuideView(
               reg: reg,
               reservedIndex: reservedIndex,
-              guide: guideWithSubchannelSetting(
-                guide,
-                ref.watch(showSubchannelsProvider),
+              // The viewer's not-watched channels drop out of
+              // the guide as they do from the live list (owner
+              // request 2026-11-26): the column itself goes,
+              // not just its events.
+              guide: guideWithHiddenChannels(
+                guideWithSubchannelSetting(
+                  guide,
+                  ref.watch(showSubchannelsProvider),
+                ),
+                ref.watch(hiddenChannelsProvider),
               ),
               hiddenGenres: ref.watch(hiddenEpgGenresProvider),
               onWatchEvent: (channel) => openLiveChannelForEpg(

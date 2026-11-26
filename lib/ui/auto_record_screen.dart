@@ -243,8 +243,8 @@ class _AutoRecordRuleEditScreenState
           TextField(
             controller: _keyword,
             decoration: const InputDecoration(
-              labelText: 'タイトルキーワード',
-              hintText: '例：アニメ番組のタイトルに含まれる言葉',
+              labelText: 'キーワード',
+              hintText: '例：タイトルや概要に含まれる言葉',
               border: OutlineInputBorder(),
             ),
           ),

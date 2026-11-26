@@ -12,6 +12,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../app/auto_record_providers.dart';
 import '../app/debug_log.dart';
+import '../app/external_browser.dart';
 import '../app/log_export.dart';
 import '../app/log_folder.dart';
 import '../app/log_share.dart';
@@ -24,6 +25,7 @@ import 'dtcp_credential_screen.dart';
 import 'epg_hidden_genres_screen.dart';
 import 'error_messages.dart';
 import 'format.dart';
+import 'hidden_channels_screen.dart';
 import 'player_hwdec_policy.dart';
 import 'tv_focus.dart';
 import 'widgets.dart';
@@ -112,6 +114,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         const PopupMenuItem(
                           value: 'verify',
                           child: Text('登録を検証'),
+                        ),
+                        const PopupMenuItem(
+                          value: 'home',
+                          child: Text('nasne HOME を開く'),
                         ),
                         const PopupMenuItem(
                           value: 'remove',
@@ -220,6 +226,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               context,
               MaterialPageRoute<void>(
                 builder: (_) => const EpgHiddenGenresScreen(),
+              ),
+            ),
+          ),
+          ListTile(
+            title: const Text('見ないチャンネル'),
+            subtitle: const Text('選んだチャンネルは TV視聴と番組表に表示されなくなります'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => const HiddenChannelsScreen(),
               ),
             ),
           ),
@@ -569,6 +586,32 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     await _registerDevice(device);
   }
 
+  /// Opens the unit's nasne HOME in the external browser
+  /// (owner request 2026-11-26). Failures are shown, not
+  /// swallowed — the same defensive line as the log actions
+  /// above: a tap that silently does nothing reads as a bug.
+  Future<void> _openNasneHome(RegisteredNasne reg) async {
+    final opener = ref.read(externalBrowserOpenerProvider);
+    try {
+      final outcome = await opener.open(nasneHomeUri(reg.host));
+      ref.read(diagLogProvider)(
+        DiagCategory.ui,
+        'nasne home open: outcome=${outcome.name} host=${reg.host}',
+      );
+      if (!mounted) return;
+      if (outcome == ExternalBrowserOpenOutcome.unsupported) {
+        showSnack(context, 'このプラットフォームではブラウザを開けません');
+      }
+    } catch (e) {
+      ref.read(diagLogProvider)(
+        DiagCategory.ui,
+        'nasne home open failed: $e',
+      );
+      if (!mounted) return;
+      showSnack(context, 'nasne HOME を開けませんでした');
+    }
+  }
+
   Future<void> _onRegistrationAction(String action, RegisteredNasne reg) async {
     switch (action) {
       case 'select':
@@ -585,6 +628,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           if (!mounted) return;
           showSnack(context, userMessageForError(e));
         }
+      case 'home':
+        await _openNasneHome(reg);
       case 'remove':
         final ok = await confirmDialog(
           context,

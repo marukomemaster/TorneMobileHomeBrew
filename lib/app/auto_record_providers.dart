@@ -28,14 +28,33 @@ import 'state.dart';
 class AutoRecordRulesNotifier extends Notifier<List<AutoRecordRule>> {
   static const _key = 'auto_record_rules';
 
+  /// The initial read-back of the persisted rules.
+  /// [build] cannot await, so the load lands in state
+  /// a moment after the provider is first read; a
+  /// caller that must not plan against a list that
+  /// has not landed yet — the startup check above
+  /// all, which fires in the same breath as this
+  /// provider's first read — awaits [rulesWhenLoaded]
+  /// instead of reading state early and finding no
+  /// rules at all.
+  Future<void>? _load;
+
   @override
   List<AutoRecordRule> build() {
     final store = ref.watch(keyValueStoreProvider);
-    Future.microtask(() async {
+    _load = Future.microtask(() async {
       final rules = decodeAutoRecordRules(await store.read(_key));
       if (rules.isNotEmpty && state.isEmpty) state = rules;
     });
     return const [];
+  }
+
+  /// The rules in effect once the initial load has
+  /// landed: the persisted list, or whatever the
+  /// viewer has already put in its place.
+  Future<List<AutoRecordRule>> rulesWhenLoaded() async {
+    await _load;
+    return state;
   }
 
   Future<void> _save(List<AutoRecordRule> rules) async {
@@ -198,7 +217,7 @@ class AutoRecordRunSummary {
 /// the keyword, the genre label, or both.
 String autoRecordRuleText(AutoRecordRule rule) {
   final parts = [
-    if (rule.keyword.trim().isNotEmpty) 'タイトル「${rule.keyword.trim()}」',
+    if (rule.keyword.trim().isNotEmpty) 'キーワード「${rule.keyword.trim()}」',
     if (rule.genreLevel1 != null)
       'ジャンル「${epgGenreLabel(rule.genreLevel1) ?? rule.genreLevel1}」',
   ];
@@ -225,7 +244,16 @@ class AutoRecordChecker {
 
   Future<AutoRecordRunSummary> run() async {
     if (_running) return const AutoRecordRunSummary();
-    final rules = _ref.read(autoRecordRulesProvider);
+    // The persisted rules land asynchronously after
+    // the provider's first read (see
+    // AutoRecordRulesNotifier): reading state here
+    // without waiting made the startup check — which
+    // runs in the same breath — always find no rules
+    // and reserve nothing, however many matches the
+    // guide held.
+    final rules = await _ref
+        .read(autoRecordRulesProvider.notifier)
+        .rulesWhenLoaded();
     if (!rules.any((r) => r.enabled && r.isConfigured)) {
       return const AutoRecordRunSummary();
     }

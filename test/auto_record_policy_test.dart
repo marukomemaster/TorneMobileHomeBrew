@@ -33,6 +33,7 @@ void main() {
     DateTime start,
     int minutes, {
     String? title,
+    String? description,
     int? genre,
     Channel on = channel,
     int eventId = 1,
@@ -44,6 +45,7 @@ void main() {
         start: start,
         duration: Duration(minutes: minutes),
         title: title,
+        description: description,
         genreLevel1: genre,
       ),
     );
@@ -72,11 +74,24 @@ void main() {
   DateTime at(int day, int hour, [int minute = 0]) =>
       DateTime(2026, 11, day, hour, minute);
 
-  EpgEvent event({String? title, int? genre}) => EpgEvent(
+  EpgEvent event({
+    String? title,
+    int? genre,
+    String? shortText,
+    String? description,
+    String? cast,
+    String? extendedText,
+    List<EpgExtendedItem> extendedItems = const [],
+  }) => EpgEvent(
     eventId: 1,
     start: at(27, 20),
     duration: const Duration(minutes: 30),
     title: title,
+    shortText: shortText,
+    description: description,
+    cast: cast,
+    extendedText: extendedText,
+    extendedItems: extendedItems,
     genreLevel1: genre,
   );
 
@@ -85,6 +100,79 @@ void main() {
       const rule = AutoRecordRule(id: 'a', keyword: 'news');
       expect(autoRecordRuleMatches(rule, event(title: 'News ABC')), isTrue);
       expect(autoRecordRuleMatches(rule, event(title: 'ドラマ')), isFalse);
+    });
+
+    test('keyword matches the outline and the description too', () {
+      const rule = AutoRecordRule(id: 'a', keyword: '宇宙');
+      expect(
+        autoRecordRuleMatches(
+          rule,
+          event(title: 'ドキュメント', shortText: '宇宙の謎に迫る'),
+        ),
+        isTrue,
+      );
+      expect(
+        autoRecordRuleMatches(
+          rule,
+          event(title: 'ドキュメント', description: '宇宙ステーションの記録'),
+        ),
+        isTrue,
+      );
+      expect(
+        autoRecordRuleMatches(
+          rule,
+          event(title: 'ドキュメント', shortText: '海の謎に迫る'),
+        ),
+        isFalse,
+      );
+    });
+
+    test('keyword matches the cast and the extended text too', () {
+      const rule = AutoRecordRule(id: 'a', keyword: '山田');
+      expect(
+        autoRecordRuleMatches(rule, event(title: 'ドラマ', cast: '山田太郎')),
+        isTrue,
+      );
+      expect(
+        autoRecordRuleMatches(
+          rule,
+          event(title: 'ドラマ', extendedText: '出演は山田太郎'),
+        ),
+        isTrue,
+      );
+      expect(
+        autoRecordRuleMatches(
+          rule,
+          event(
+            title: 'ドラマ',
+            extendedItems: const [
+              EpgExtendedItem(label: '解説', value: '山田太郎が解説'),
+            ],
+          ),
+        ),
+        isTrue,
+      );
+      expect(
+        autoRecordRuleMatches(rule, event(title: 'ドラマ', cast: '佐藤花')),
+        isFalse,
+      );
+    });
+
+    test('a keyword in the description claims an untitled event', () {
+      const rule = AutoRecordRule(id: 'a', keyword: '宇宙');
+      expect(autoRecordRuleMatches(rule, event(description: '宇宙の番組')), isTrue);
+    });
+
+    test('the genre still gates a keyword hit in the description', () {
+      const rule = AutoRecordRule(id: 'a', keyword: '宇宙', genreLevel1: 7);
+      expect(
+        autoRecordRuleMatches(rule, event(description: '宇宙の番組', genre: 7)),
+        isTrue,
+      );
+      expect(
+        autoRecordRuleMatches(rule, event(description: '宇宙の番組', genre: 3)),
+        isFalse,
+      );
     });
 
     test('genre must be the event genre', () {
@@ -166,6 +254,17 @@ void main() {
       final plan = planAutoRecord(
         rules: const [animeRule],
         hits: [hit(at(27, 20), 30, title: 'アニメ番組')],
+        existing: const [],
+        now: now,
+      );
+      expect(plan.reservations.length, 1);
+      expect(plan.skips, isEmpty);
+    });
+
+    test('a keyword found only in the description is planned', () {
+      final plan = planAutoRecord(
+        rules: const [AutoRecordRule(id: 's', keyword: '宇宙')],
+        hits: [hit(at(27, 20), 30, title: 'ドキュメント', description: '宇宙の記録')],
         existing: const [],
         now: now,
       );

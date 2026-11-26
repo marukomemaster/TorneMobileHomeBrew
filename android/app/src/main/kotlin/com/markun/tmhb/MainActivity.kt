@@ -148,6 +148,30 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, EXTERNAL_BROWSER_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    // Opening nasne HOME in the external browser
+                    // (owner request 2026-11-26): a plain
+                    // ACTION_VIEW on the URL the Dart side built;
+                    // no browser present surfaces as an error
+                    // the settings screen can show.
+                    "openUrl" -> {
+                        val url = call.argument<String>("url")
+                        if (url == null) {
+                            result.error("invalid_args", "missing url", null)
+                        } else {
+                            try {
+                                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                result.success(null)
+                            } catch (e: Exception) {
+                                result.error("open_failed", e.message, null)
+                            }
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, AKE_SOCKET_EVENTS_CHANNEL)
             .setStreamHandler(object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -492,6 +516,7 @@ class MainActivity : FlutterActivity() {
         private const val AKE_SOCKET_CHANNEL = "com.markun.tmhb/ake_socket"
         private const val AKE_SOCKET_EVENTS_CHANNEL = "com.markun.tmhb/ake_socket_events"
         private const val CREDENTIAL_DOWNLOADS_CHANNEL = "com.markun.tmhb/credential_downloads"
+        private const val EXTERNAL_BROWSER_CHANNEL = "com.markun.tmhb/external_browser"
         private const val REQUEST_READ_EXTERNAL_STORAGE = 7411
         private const val REQUEST_WRITE_EXTERNAL_STORAGE = 7412
         private const val LOG_EXPORT_DIRECTORY_NAME = "tmhb-log"

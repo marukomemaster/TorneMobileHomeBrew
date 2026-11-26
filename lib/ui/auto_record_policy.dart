@@ -1,6 +1,6 @@
 /// Auto record rules and planning (user-fork addition;
 /// not part of the upstream plans): the viewer's
-/// standing rules — a title keyword, a genre, or both —
+/// standing rules — a keyword, a genre, or both —
 /// are matched against the held programme guide, and
 /// the matches are reserved in rule order, the way the
 /// official clients' keyword recording works, within
@@ -48,8 +48,10 @@ class AutoRecordRule {
   /// timestamp-based id minted by the editor).
   final String id;
 
-  /// Title substring, matched case-insensitively.
-  /// Empty means the rule does not filter by title.
+  /// Keyword searched in the programme's own text
+  /// (see [autoRecordRuleMatches] for the field set),
+  /// matched case-insensitively. Empty means the rule
+  /// does not filter by text.
   final String keyword;
 
   /// ARIB genre level-1 value, or null when the rule
@@ -120,19 +122,39 @@ List<AutoRecordRule> decodeAutoRecordRules(String? stored) {
 
 /// Whether [rule] claims [event]: the genre must be
 /// the event's when the rule names one, and the
-/// keyword must appear in the title when the rule
-/// names one (the title only — the search screen's
-/// wider field set is for finding, a standing rule
-/// should mean what the viewer typed).
+/// keyword must appear in the programme's own text
+/// when the rule names one. The text set is the
+/// title, the outline (shortText), the programme
+/// description, the cast and the remaining
+/// extended-event text — the fields the search
+/// screen indexes, minus the channel name, which is
+/// not the programme's text. (Owner request
+/// 2026-11-26: a keyword that appears only in the
+/// outline or the description claims the programme
+/// too, not just one in the title.)
 bool autoRecordRuleMatches(AutoRecordRule rule, EpgEvent event) {
   if (!rule.isConfigured) return false;
   final genre = rule.genreLevel1;
   if (genre != null && event.genreLevel1 != genre) return false;
   final keyword = rule.keyword.trim().toLowerCase();
   if (keyword.isEmpty) return true;
-  final title = event.title;
-  if (title == null) return false;
-  return title.toLowerCase().contains(keyword);
+  for (final text in _keywordTexts(event)) {
+    if (text != null && text.toLowerCase().contains(keyword)) return true;
+  }
+  return false;
+}
+
+/// The programme texts a keyword is searched in (see
+/// [autoRecordRuleMatches]).
+Iterable<String?> _keywordTexts(EpgEvent event) sync* {
+  yield event.title;
+  yield event.shortText;
+  yield event.description;
+  yield event.cast;
+  yield event.extendedText;
+  for (final item in event.extendedItems) {
+    yield item.value;
+  }
 }
 
 /// Why a matched programme was not reserved.

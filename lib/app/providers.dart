@@ -15,6 +15,7 @@ import '../ui/player_hwdec_policy.dart';
 import 'ake_socket.dart';
 import 'credential_downloads.dart';
 import 'debug_log.dart';
+import 'external_browser.dart';
 import 'file_pick.dart';
 import 'log_export.dart';
 import 'log_folder.dart';
@@ -243,6 +244,82 @@ final hiddenEpgGenresProvider =
       HiddenEpgGenresNotifier.new,
     );
 
+/// Channels the viewer does not watch (owner request
+/// 2026-11-26): a hidden channel drops out of the TV視聴
+/// live list and the programme guide alike (the filter
+/// itself is ui/channel_visibility.dart). Persisted in the
+/// key-value store as the comma-separated channel keys —
+/// the (networkId, transportStreamId, serviceId) triple in
+/// the stored form ui/channel_visibility.dart defines. The
+/// choice is app-wide, not per device: the triple names a
+/// broadcast service, the same service on every unit in the
+/// area.
+class HiddenChannelsNotifier extends Notifier<Set<String>> {
+  static const _key = 'hidden_channels';
+
+  /// The initial read-back of the persisted choice.
+  /// [build] cannot await, so the restore lands a moment
+  /// after the provider is first read; every mutation
+  /// awaits it before applying, so a restore that lands
+  /// late can never resurrect a choice a mutation — above
+  /// all a reset — has already replaced (the lost-update
+  /// shape the store's data rules exist to prevent).
+  Future<void>? _load;
+
+  @override
+  Set<String> build() {
+    final store = ref.watch(keyValueStoreProvider);
+    _load = Future.microtask(() async {
+      final restored = decode(await store.read(_key));
+      if (restored.isNotEmpty && state.isEmpty) state = restored;
+    });
+    return const {};
+  }
+
+  /// The stored form: comma-separated channel keys.
+  /// Anything that is not a three-part numeric triple is
+  /// dropped, never fatal.
+  static Set<String> decode(String? raw) {
+    final keys = <String>{};
+    for (final part in (raw ?? '').split(',')) {
+      final trimmed = part.trim();
+      final fields = trimmed.split(':');
+      if (fields.length != 3) continue;
+      if (fields.every((f) => int.tryParse(f) != null)) keys.add(trimmed);
+    }
+    return keys;
+  }
+
+  Future<void> _persist(Set<String> keys) async {
+    final sorted = keys.toList()..sort();
+    await ref.read(keyValueStoreProvider).write(_key, sorted.join(','));
+  }
+
+  Future<void> setHidden(String channelKey, bool hidden) async {
+    await _load;
+    final next = {...state};
+    if (hidden) {
+      next.add(channelKey);
+    } else {
+      next.remove(channelKey);
+    }
+    state = next;
+    await _persist(next);
+  }
+
+  /// Shows every channel again (the settings page's reset).
+  Future<void> reset() async {
+    await _load;
+    state = const {};
+    await _persist(const {});
+  }
+}
+
+final hiddenChannelsProvider =
+    NotifierProvider<HiddenChannelsNotifier, Set<String>>(
+      HiddenChannelsNotifier.new,
+    );
+
 /// The playback quality every viewing starts with (Discord
 /// request, 2026-11-21): false = the content's original quality
 /// (DR / 3倍 as recorded), true = the mobile transcode. One
@@ -446,6 +523,16 @@ final debugLogDownloadsExporterProvider = Provider<DebugLogDownloadsExporter?>((
   if (dir == null || !Platform.isAndroid) return null;
   return DebugLogDownloadsExporter(storeDirectory: dir);
 });
+
+/// Opens a URL in the device's external browser (owner
+/// request 2026-11-26): the settings screen's registration
+/// menu sends the unit's nasne HOME there. Like the file
+/// picker above this needs no store directory, so it is
+/// always available; platforms with no launch route answer
+/// unsupported at call time.
+final externalBrowserOpenerProvider = Provider<ExternalBrowserOpener>(
+  (ref) => ExternalBrowserOpener(),
+);
 
 /// Picks a file's bytes for the credential import (plan 84).
 /// Unlike the log actions above this needs no store directory,

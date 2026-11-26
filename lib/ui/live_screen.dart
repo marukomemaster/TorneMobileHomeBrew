@@ -22,6 +22,7 @@ import 'package:material_ui/material_ui.dart';
 import '../app/providers.dart';
 import '../app/state.dart';
 import '../core/core.dart';
+import 'channel_visibility.dart';
 import 'epg_subchannel_visibility.dart';
 import 'format.dart';
 import 'playback_launcher.dart';
@@ -118,12 +119,16 @@ class _LiveList extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final bands = ref.watch(liveChannelsProvider(reg));
     final showSubchannels = ref.watch(showSubchannelsProvider);
+    final hiddenChannels = ref.watch(hiddenChannelsProvider);
     return asyncSection(bands, (list) {
       // The guide's subchannel switch applies to this list
-      // too (plan 95): the same setting, not a new one.
-      final visibleBands = liveBandsWithSubchannelSetting(
-        list,
-        showSubchannels,
+      // too (plan 95): the same setting, not a new one. The
+      // viewer's not-watched channels drop out as well
+      // (owner request 2026-11-26), under the same choice
+      // the programme guide applies.
+      final visibleBands = liveBandsWithHiddenChannels(
+        liveBandsWithSubchannelSetting(list, showSubchannels),
+        hiddenChannels,
       );
       final channels = [for (final band in visibleBands) ...band.channels];
       if (channels.isEmpty) {
@@ -155,10 +160,21 @@ class _LiveList extends ConsumerWidget {
               for (final channel in selectedBand.channels)
                 ListTile(
                   selected: channel.id == selectedId,
+                  // The rows are tightened (owner request
+                  // 2026-11-26): the vertical padding is
+                  // half the plan-95 large-row value and
+                  // the tile density is compact, so more
+                  // channels fit on screen at once —
+                  // measured on a two-line row, 88 down
+                  // to 68 logical pixels. Font sizes are
+                  // untouched and the subtitle keeps its
+                  // two lines, so the channel name and
+                  // the current programme read as before.
                   contentPadding: const EdgeInsets.symmetric(
                     horizontal: 16,
-                    vertical: 8,
+                    vertical: 4,
                   ),
+                  visualDensity: VisualDensity.compact,
                   leading: const Icon(Icons.live_tv_outlined),
                   title: Text(channel.channelName ?? channel.programTitle),
                   subtitle: Text(
@@ -496,9 +512,13 @@ class _LiveChannelDetailViewState extends ConsumerState<LiveChannelDetailView> {
   ) {
     final bands = ref.read(liveChannelsProvider(reg)).value;
     if (bands == null) return null;
-    final visible = liveBandsWithSubchannelSetting(
-      bands,
-      ref.read(showSubchannelsProvider),
+    // The same two filters the list applies, so zapping
+    // inside the player walks the channels the viewer
+    // actually sees — a not-watched channel is never zapped
+    // into either.
+    final visible = liveBandsWithHiddenChannels(
+      liveBandsWithSubchannelSetting(bands, ref.read(showSubchannelsProvider)),
+      ref.read(hiddenChannelsProvider),
     );
     for (final band in visible) {
       if (!band.channels.any((c) => c.id == channel.id)) continue;

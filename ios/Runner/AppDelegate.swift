@@ -30,6 +30,13 @@ import UIKit
     {
       ShareHub.shared.register(messenger: shareRegistrar.messenger())
     }
+    // Native external browser channel (owner request
+    // 2026-11-26).
+    if let browserRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "ExternalBrowserChannels")
+    {
+      ExternalBrowserHub.shared.register(messenger: browserRegistrar.messenger())
+    }
   }
 }
 
@@ -132,5 +139,49 @@ final class ShareHub {
       controller = presented
     }
     return controller
+  }
+}
+
+/// Native external browser channel (owner request
+/// 2026-11-26): hands a URL — the registered unit's nasne
+/// HOME — to the system browser through
+/// `UIApplication.open`. The completion handler's answer is
+/// reported back, so a refusal surfaces on the Dart side as
+/// an error the settings screen can show instead of a tap
+/// that quietly did nothing. The handler runs on the main
+/// thread, so touching UIApplication here is safe.
+final class ExternalBrowserHub {
+  static let shared = ExternalBrowserHub()
+
+  func register(messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(
+      name: "com.markun.tmhb/external_browser", binaryMessenger: messenger)
+    channel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "openUrl":
+        let args = call.arguments as? [String: Any] ?? [:]
+        guard let urlString = args["url"] as? String,
+          let url = URL(string: urlString)
+        else {
+          result(
+            FlutterError(
+              code: "invalid_args", message: "missing or invalid url",
+              details: nil))
+          return
+        }
+        UIApplication.shared.open(url, options: [:]) { success in
+          if success {
+            result(nil)
+          } else {
+            result(
+              FlutterError(
+                code: "open_failed",
+                message: "the system refused to open the URL", details: nil))
+          }
+        }
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
   }
 }

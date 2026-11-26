@@ -201,6 +201,7 @@ import 'player_chapter_policy.dart';
 import 'player_cm_autoskip_policy.dart';
 import 'player_error_policy.dart';
 import 'player_hwdec_policy.dart';
+import 'player_record_switch_policy.dart';
 import 'player_resume_policy.dart';
 import 'player_safe_area_policy.dart';
 import 'player_seek_policy.dart';
@@ -228,6 +229,49 @@ class PlayerZapTarget {
   final Future<PlaybackSession> Function() start;
 }
 
+/// A recording the viewer can move to from inside the
+/// player (recordings only; user-fork addition,
+/// 2026-11-26): the title's name, the start that opens
+/// its session — the same start the title's detail view
+/// runs for its own playback (see titles_screen.dart) —
+/// and the per-title playback terms a switch adopts when
+/// it lands: where the title opens, where its stopping
+/// position is reported, and where its chapter points
+/// come from. Switching recordings is starting the new
+/// title's session after stopping the old one, the same
+/// shape as a channel zap.
+class PlayerRecordTarget {
+  const PlayerRecordTarget({
+    required this.name,
+    required this.start,
+    this.initialStart,
+    this.onResumePosition,
+    this.loadChapters,
+  });
+
+  /// Display name: the recording's title, as the player's
+  /// title while it plays.
+  final String name;
+
+  /// Starts this recording's playback session.
+  final Future<PlaybackSession> Function() start;
+
+  /// Where this recording opens when a switch lands on
+  /// it (see [PlayerScreen.initialStart]); null starts
+  /// at the beginning.
+  final Duration? initialStart;
+
+  /// Where this recording's stopping position goes when
+  /// the viewer leaves it — by closing the screen or by
+  /// switching to another recording (see
+  /// [PlayerScreen.onResumePosition]).
+  final Future<void> Function(Duration position)? onResumePosition;
+
+  /// Where this recording's chapter points come from
+  /// (see [PlayerScreen.loadChapters]).
+  final Future<List<Duration>> Function()? loadChapters;
+}
+
 class PlayerScreen extends ConsumerStatefulWidget {
   const PlayerScreen({
     super.key,
@@ -239,6 +283,8 @@ class PlayerScreen extends ConsumerStatefulWidget {
     this.loadChapters,
     this.zapTargets,
     this.zapIndex = 0,
+    this.recordTargets,
+    this.recordIndex = 0,
   });
 
   /// Display heading: a recording's title, or a live channel's
@@ -310,6 +356,22 @@ class PlayerScreen extends ConsumerStatefulWidget {
   /// [session] is playing.
   final int zapIndex;
 
+  /// The recordings the viewer can move between without
+  /// leaving the player (recordings only; user-fork
+  /// addition, 2026-11-26): the playable titles of the
+  /// recorded list, in the order the list shows them,
+  /// with the title this screen opened at [recordIndex].
+  /// The standing list panel (the same layout as the
+  /// live channel panel) offers them, and picking one
+  /// switches playback in place. Null — live viewing,
+  /// and a recorded list with a single playable title —
+  /// offers no movement.
+  final List<PlayerRecordTarget>? recordTargets;
+
+  /// Where [recordTargets] starts: the index of the
+  /// title [session] is playing.
+  final int recordIndex;
+
   @override
   ConsumerState<PlayerScreen> createState() => _PlayerScreenState();
 }
@@ -342,6 +404,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   late final bool _tvVariant;
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   Timer? _watchdog;
+
+  /// A touch long press on the viewing area, tracked
+  /// from the observing pointer listener (see
+  /// _onPlayerPointerDown): while the timer runs, the
+  /// press is still down and still; when it fires, the
+  /// channel list opens at the press position.
+  Timer? _zapLongPressTimer;
+  int? _zapLongPressPointer;
+  Offset? _zapLongPressStart;
   bool _playing = false;
   String? _error;
 
@@ -489,13 +560,39 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// one as it swaps.
   late PlaybackSession _session;
 
+  /// The per-title playback terms in force: the widget's
+  /// [PlayerScreen.initialStart], [PlayerScreen.onResumePosition]
+  /// and [PlayerScreen.loadChapters] at the first open,
+  /// and the record target's own after a switch to another
+  /// recording (see _switchToRecord). [_open] and the
+  /// resume report read these, never the widget's, so a
+  /// switch cannot open the new title on the old one's
+  /// terms or report the old title's stopping position
+  /// against the new one's name.
+  Duration? _initialStart;
+  Future<void> Function(Duration position)? _resumeSink;
+  Future<List<Duration>> Function()? _chapterLoader;
+
   /// Where the viewer stands in [PlayerScreen.zapTargets].
   int _zapIndex = 0;
 
-  /// A channel switch is in flight: the old session is
-  /// stopping or the new one is starting. Movement input
-  /// is ignored meanwhile, so a held key or a double tap
-  /// cannot queue competing starts against one tuner.
+  /// Where the viewer stands in
+  /// [PlayerScreen.recordTargets].
+  int _recordIndex = 0;
+
+  /// Whether the standing list panel (the channel list
+  /// at live viewing, the recorded list at a recording)
+  /// is shown beside (or below) the viewing area
+  /// (user-fork addition, 2026-11-26; see _bodyWithPanel).
+  /// Off at open: the plain full-bleed picture stays
+  /// the default, and the viewer summons the list.
+  bool _listPanelVisible = false;
+
+  /// A switch is in flight (a channel zap, or a move to
+  /// another recording): the old session is stopping or
+  /// the new one is starting. Movement input is ignored
+  /// meanwhile, so a held key or a double tap cannot
+  /// queue competing starts against one tuner.
   bool _zapping = false;
 
   /// An open is in flight (the first open, or a switch's):
@@ -508,12 +605,35 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   bool get _canZap =>
       canZap(live: widget.live, targetCount: widget.zapTargets?.length ?? 0);
 
+  /// Whether movement between recordings is offered
+  /// (see player_record_switch_policy).
+  bool get _canSwitchRecords => canSwitchRecords(
+    live: widget.live,
+    targetCount: widget.recordTargets?.length ?? 0,
+  );
+
+  /// The heading while no zap header is shown: the
+  /// record target the viewer stands on, so the title
+  /// follows a switch; the widget's own title otherwise
+  /// (and for live viewing, which the zap header covers
+  /// whenever targets exist).
+  String get _displayTitle {
+    final targets = widget.recordTargets;
+    if (targets != null && targets.isNotEmpty) {
+      return targets[_recordIndex].name;
+    }
+    return widget.title;
+  }
+
   @override
   void initState() {
     super.initState();
     _diag = ref.read(diagLogProvider);
     _tvVariant = ref.read(appVariantProvider).isTv;
     _session = widget.session;
+    _initialStart = widget.initialStart;
+    _resumeSink = widget.onResumePosition;
+    _chapterLoader = widget.loadChapters;
     _zapIndex = widget.zapIndex;
     final zapTargets = widget.zapTargets;
     if (zapTargets != null &&
@@ -522,6 +642,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       // not reach the header's lookups; fall back to the
       // first target rather than failing the screen.
       _zapIndex = 0;
+    }
+    _recordIndex = widget.recordIndex;
+    final recordTargets = widget.recordTargets;
+    if (recordTargets != null &&
+        (_recordIndex < 0 || _recordIndex >= recordTargets.length)) {
+      // The same guard as the zap index: a caller-supplied
+      // index outside the targets falls back to the first
+      // target rather than failing the screen.
+      _recordIndex = 0;
     }
     if (_canZap) {
       services.HardwareKeyboard.instance.addHandler(_onZapKeyEvent);
@@ -864,9 +993,63 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// already handle, and a press that is not a right
   /// click, or a screen that cannot zap, passes by
   /// unnoticed.
+  ///
+  /// A touch long press opens the same list (user-fork
+  /// addition, 2026-11-26): a phone has no right click,
+  /// so the viewer holds the viewing area instead. The
+  /// hold is timed from this same observing listener —
+  /// never a gesture recogniser — so the controls' own
+  /// taps and drags are not competed for; a press that
+  /// lifts early or wanders past the touch slop is a
+  /// tap or a drag, not a hold, and opens nothing.
   void _onPlayerPointerDown(PointerDownEvent event) {
-    if ((event.buttons & kSecondaryMouseButton) == 0) return;
-    unawaited(_showZapChannelList(event.position));
+    if ((event.buttons & kSecondaryMouseButton) != 0) {
+      unawaited(_showZapChannelList(event.position));
+      return;
+    }
+    if (event.kind == PointerDeviceKind.touch &&
+        (event.buttons & kPrimaryButton) != 0) {
+      _zapLongPressPointer = event.pointer;
+      _zapLongPressStart = event.position;
+      _zapLongPressTimer?.cancel();
+      _zapLongPressTimer = Timer(kLongPressTimeout, _onZapLongPressFired);
+    }
+  }
+
+  /// The held touch reached the long-press timeout
+  /// still down: open the channel list where the press
+  /// began, under the same conditions as a right click
+  /// ([_showZapChannelList] itself gates on them).
+  void _onZapLongPressFired() {
+    _zapLongPressTimer = null;
+    final start = _zapLongPressStart;
+    _zapLongPressPointer = null;
+    _zapLongPressStart = null;
+    if (start != null && mounted) {
+      unawaited(_showZapChannelList(start));
+    }
+  }
+
+  /// Ends a tracked long press without opening the
+  /// list: the finger lifted or the press was
+  /// cancelled before the timeout.
+  void _onPlayerPointerEnd(PointerEvent event) {
+    if (event.pointer != _zapLongPressPointer) return;
+    _zapLongPressTimer?.cancel();
+    _zapLongPressTimer = null;
+    _zapLongPressPointer = null;
+    _zapLongPressStart = null;
+  }
+
+  /// A tracked press that wanders past the touch slop
+  /// is a drag (the controls' seek and the like), not
+  /// a hold: it stops being a long press.
+  void _onPlayerPointerMove(PointerMoveEvent event) {
+    if (event.pointer != _zapLongPressPointer) return;
+    final start = _zapLongPressStart;
+    if (start != null && (event.position - start).distance > kTouchSlop) {
+      _onPlayerPointerEnd(event);
+    }
   }
 
   /// Shows the band's channels as a menu at [position]
@@ -981,6 +1164,119 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       _zapping = false;
       // Player events were held back while the switch was
       // in flight; if the new channel already reached
+      // playing in that window, take up the started state
+      // the playing listener would have set.
+      if (_playingNow) {
+        _playing = true;
+        _watchdog?.cancel();
+      }
+    });
+  }
+
+  /// Switches playback to the recording at [index], in
+  /// place (user-fork addition, 2026-11-26): the current
+  /// session stops, the picked title's session starts and
+  /// opens on this screen's player, and the heading and
+  /// the standing list follow — [_zapTo]'s shape, for the
+  /// recorded list.
+  ///
+  /// Leaving a title reports where its viewing stopped,
+  /// exactly as leaving the screen does (plan 102): the
+  /// position is decided from the fields as they stand
+  /// and sent with the leaving title's own sink before
+  /// anything is swapped. The report goes even when the
+  /// switch then fails — the viewing did end at that
+  /// position either way — and a failed start lands on
+  /// the start error with the list still at hand, so the
+  /// viewer can pick the title again (its recorded resume
+  /// point now includes the viewing just ended) or move
+  /// elsewhere. A switch that finishes after the screen
+  /// went away stops the session it started, like the
+  /// launcher does with a late start.
+  ///
+  /// The switch stays in flight until the new title's
+  /// open completes, under the same [_zapping] flag as a
+  /// channel zap: player events arriving meanwhile may
+  /// belong to the title being left, so the listeners
+  /// hold them back from the start / interruption state
+  /// machine, and this method reconciles the playing
+  /// state from the latest event when it lands.
+  Future<void> _switchToRecord(int index) async {
+    if (!_canSwitchRecords || _zapping || _opening || index == _recordIndex) {
+      return;
+    }
+    final target = widget.recordTargets![index];
+    _diag(
+      DiagCategory.playback,
+      'player: switching to recording ${target.name} '
+      '(index $index of ${widget.recordTargets!.length})',
+    );
+    final report = _resumePositionToReport();
+    if (report != null) _reportResumePosition(report);
+    setState(() => _zapping = true);
+    try {
+      await _session.stop();
+    } catch (e) {
+      _diag(
+        DiagCategory.playback,
+        'player: record switch: old session stop failed: $e',
+      );
+    }
+    if (!mounted) return;
+    final PlaybackSession newSession;
+    try {
+      newSession = await target.start();
+    } catch (e) {
+      _diag(DiagCategory.playback, 'player: record switch: start failed: $e');
+      if (mounted) {
+        setState(() {
+          _zapping = false;
+          _error = '$e';
+        });
+      }
+      return;
+    }
+    if (!mounted) {
+      await newSession.stop();
+      return;
+    }
+    _session = newSession;
+    // The new title's own playback terms take over: its
+    // open position, its resume sink and its chapter
+    // loader. The chapter points and the CM auto skip's
+    // per-title state belong to the title being left and
+    // start over; the player's own properties persist
+    // across the switch, and _open re-pins what it pins
+    // at every open.
+    _initialStart = target.initialStart;
+    _resumeSink = target.onResumePosition;
+    _chapterLoader = target.loadChapters;
+    _watchdog?.cancel();
+    _watchdog = Timer(startTimeout, _onStartTimeout);
+    _stallTimer?.cancel();
+    _playing = false;
+    _playingNow = false;
+    _completed = false;
+    _bufferingSincePlaying = false;
+    _lastPosition = Duration.zero;
+    _chapters = const [];
+    _cmSuppressedRunStart = null;
+    _cmAutoSkipPendingTarget = null;
+    setState(() {
+      _recordIndex = index;
+      _interrupted = false;
+      _interruptDetail = null;
+      _error = null;
+      _tracks = const Tracks();
+      _selectedTrack = const Track();
+    });
+    await _open();
+    if (!mounted) return;
+    _loadChapters();
+    setState(() {
+      _zapping = false;
+      // Player events were held back while the switch was
+      // in flight; if the new title already reached
       // playing in that window, take up the started state
       // the playing listener would have set.
       if (_playingNow) {
@@ -1134,8 +1430,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// failure — including a synchronous throw from the
   /// loader resolving the unit's services through the
   /// caller's ref — is logged and dropped.
+  ///
+  /// A switch to another recording runs this again with
+  /// that title's loader (see _switchToRecord): a load
+  /// that lands after the viewer has already moved on is
+  /// dropped, so a slow title's points never settle on
+  /// the title now playing.
   Future<void> _loadChapters() async {
-    final loader = widget.loadChapters;
+    final loader = _chapterLoader;
     if (loader == null || widget.live) return;
     try {
       final chapters = await loader();
@@ -1143,7 +1445,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         DiagCategory.playback,
         'player: chapters: ${chapters.length} points loaded (plan 112)',
       );
-      if (mounted && chapters.isNotEmpty) {
+      if (mounted && chapters.isNotEmpty && identical(loader, _chapterLoader)) {
         setState(() => _chapters = chapters);
       }
     } catch (e) {
@@ -1393,10 +1695,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         );
       }
       final start =
-          (!widget.live &&
-              widget.initialStart != null &&
-              widget.initialStart! > Duration.zero)
-          ? widget.initialStart
+          (!widget.live && _initialStart != null && _initialStart! > Duration.zero)
+          ? _initialStart
           : null;
       if (start != null) {
         _diag(
@@ -1636,7 +1936,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// dispose runs while the widget is deactivating, where
   /// Riverpod 3 forbids ref (plan 104).
   Duration? _resumePositionToReport() {
-    if (widget.onResumePosition == null) return null;
+    if (_resumeSink == null) return null;
     return resumePositionToReport(
       started: _playing,
       completed: _completed,
@@ -1652,7 +1952,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// before its future exists — a synchronous throw there is
   /// a failed report, not a failed teardown (plan 104).
   void _reportResumePosition(Duration position) {
-    final sink = widget.onResumePosition;
+    final sink = _resumeSink;
     if (sink == null) return;
     _diag(
       DiagCategory.playback,
@@ -1726,6 +2026,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       [
         (name: 'watchdog', run: () => _watchdog?.cancel()),
         (name: 'stall timer', run: () => _stallTimer?.cancel()),
+        (name: 'long-press timer', run: () => _zapLongPressTimer?.cancel()),
         (name: 'wakelock', run: () => _wakelockSession.release()),
         (
           name: 'subscriptions',
@@ -1830,10 +2131,23 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     // padding: it reports the raw inset whether or not
     // an ancestor has consumed the padding form.
     final bottomViewPadding = MediaQuery.viewPaddingOf(context).bottom;
+    final showListPanel =
+        _listPanelVisible && (_canZap || _canSwitchRecords);
     return Scaffold(
       appBar: AppBar(
-        title: _canZap ? _buildZapTitle(context) : Text(widget.title),
+        title: _canZap ? _buildZapTitle(context) : Text(_displayTitle),
         actions: [
+          if (_canZap || _canSwitchRecords)
+            IconButton(
+              tooltip: _canZap ? 'チャンネル一覧' : 'タイトル一覧',
+              icon: Icon(
+                _listPanelVisible
+                    ? Icons.view_sidebar
+                    : Icons.view_sidebar_outlined,
+              ),
+              onPressed: () =>
+                  setState(() => _listPanelVisible = !_listPanelVisible),
+            ),
           if (canChangePlaybackSpeed(live: widget.live))
             PopupMenuButton<double>(
               tooltip: '再生速度',
@@ -1886,80 +2200,186 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             ),
         ],
       ),
-      body: Listener(
-        behavior: HitTestBehavior.translucent,
-        onPointerDown: _onPlayerPointerDown,
-        child: _error != null
-            ? Center(
-                child: SingleChildScrollView(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        const Text(
-                          '再生を開始できませんでした。',
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'nasne との接続やネットワークの状態を確認して、'
-                          'もう一度お試しください。',
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 8),
-                        // The raw player error (an mpv message, or
-                        // this screen's own timeout wording) is
-                        // diagnostic text, not something a viewer
-                        // can act on: it sits behind the detail
-                        // expander (plan 86, plan 85 item 9), and
-                        // is in the diagnostic log as well.
-                        ExpansionTile(
-                          title: const Text('詳細'),
-                          children: [
-                            Text(
-                              _error!,
-                              textAlign: TextAlign.center,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          ],
-                        ),
-                      ],
+      body: showListPanel
+          ? _bodyWithPanel(
+              _buildViewingArea(bottomViewPadding),
+              _canZap ? _buildChannelPanel() : _buildRecordPanel(),
+            )
+          : _buildViewingArea(bottomViewPadding),
+    );
+  }
+
+  /// The viewing area: the picture (or the start
+  /// error) under the observing pointer listener of
+  /// the right-click / long-press channel list. Kept
+  /// as one piece so the channel panel layout can sit
+  /// beside it without touching what it does.
+  Widget _buildViewingArea(double bottomViewPadding) {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: _onPlayerPointerDown,
+      onPointerMove: _onPlayerPointerMove,
+      onPointerUp: _onPlayerPointerEnd,
+      onPointerCancel: _onPlayerPointerEnd,
+      child: _error != null
+          ? Center(
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text('再生を開始できませんでした。', textAlign: TextAlign.center),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'nasne との接続やネットワークの状態を確認して、'
+                        'もう一度お試しください。',
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 8),
+                      // The raw player error (an mpv message, or
+                      // this screen's own timeout wording) is
+                      // diagnostic text, not something a viewer
+                      // can act on: it sits behind the detail
+                      // expander (plan 86, plan 85 item 9), and
+                      // is in the diagnostic log as well.
+                      ExpansionTile(
+                        title: const Text('詳細'),
+                        children: [
+                          Text(
+                            _error!,
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            )
+          : Stack(
+              children: [
+                MaterialVideoControlsTheme(
+                  normal: _materialControlsTheme(
+                    fullscreen: false,
+                    bottomViewPadding: bottomViewPadding,
+                  ),
+                  fullscreen: _materialControlsTheme(fullscreen: true),
+                  child: MaterialDesktopVideoControlsTheme(
+                    normal: _desktopControlsTheme(),
+                    fullscreen: _desktopControlsTheme(),
+                    child: Video(
+                      controller: _videoController,
+                      // The stock adaptive controls, with
+                      // the chapter ticks overlaid while
+                      // the title has points (plan 112). The
+                      // TV variant builds its own remote-
+                      // driven controls instead (plan 147).
+                      controls: _tvVariant
+                          ? _tvControls
+                          : _chapters.isEmpty
+                          ? AdaptiveVideoControls
+                          : _controlsWithChapterTicks,
                     ),
                   ),
                 ),
-              )
-            : Stack(
-                children: [
-                  MaterialVideoControlsTheme(
-                    normal: _materialControlsTheme(
-                      fullscreen: false,
-                      bottomViewPadding: bottomViewPadding,
-                    ),
-                    fullscreen: _materialControlsTheme(fullscreen: true),
-                    child: MaterialDesktopVideoControlsTheme(
-                      normal: _desktopControlsTheme(),
-                      fullscreen: _desktopControlsTheme(),
-                      child: Video(
-                        controller: _videoController,
-                        // The stock adaptive controls, with
-                        // the chapter ticks overlaid while
-                        // the title has points (plan 112). The
-                        // TV variant builds its own remote-
-                        // driven controls instead (plan 147).
-                        controls: _tvVariant
-                            ? _tvControls
-                            : _chapters.isEmpty
-                            ? AdaptiveVideoControls
-                            : _controlsWithChapterTicks,
-                      ),
-                    ),
-                  ),
-                  if (_interrupted) _buildInterruptionBanner(),
-                ],
-              ),
-      ),
+                if (_interrupted) _buildInterruptionBanner(),
+              ],
+            ),
+    );
+  }
+
+  /// The two-pane watching layout (user-fork
+  /// addition, 2026-11-26): the list — the band's
+  /// channels at live viewing, the recorded titles at
+  /// a recording — stays on screen while the picture
+  /// plays, the way the desktop clients lay it out,
+  /// instead of the picture taking the whole screen
+  /// and the list living behind a menu. Landscape puts
+  /// the list on the left and the picture on the right;
+  /// portrait keeps the picture on a 16:9 stage at the
+  /// top and gives the list the room below it. Hiding
+  /// the panel (the app-bar toggle) returns the body to
+  /// the viewing area alone, and the controls'
+  /// fullscreen is untouched either way — it shows
+  /// the picture only, as before.
+  Widget _bodyWithPanel(Widget viewingArea, Widget panel) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth >= constraints.maxHeight) {
+          return Row(
+            children: [
+              SizedBox(width: 280, child: panel),
+              const VerticalDivider(width: 1, thickness: 1),
+              Expanded(child: viewingArea),
+            ],
+          );
+        }
+        return Column(
+          children: [
+            AspectRatio(aspectRatio: 16 / 9, child: viewingArea),
+            const Divider(height: 1, thickness: 1),
+            Expanded(child: panel),
+          ],
+        );
+      },
+    );
+  }
+
+  /// The band's channels as a standing list: the same
+  /// targets, the same current-channel mark and the
+  /// same [_zapTo] as the right-click / long-press
+  /// menu — the menu is a glance, this is the list
+  /// kept at hand while zapping around. It stays live
+  /// on the start error, like the menu, so a channel
+  /// whose start failed can be left from here too.
+  Widget _buildChannelPanel() {
+    final targets = widget.zapTargets!;
+    return ListView.builder(
+      itemCount: targets.length,
+      itemBuilder: (context, i) {
+        final current = i == _zapIndex;
+        return ListTile(
+          selected: current,
+          leading: Icon(current ? Icons.check : Icons.live_tv_outlined),
+          title: Text(
+            targets[i].name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          onTap: _zapping ? null : () => _zapTo(i),
+        );
+      },
+    );
+  }
+
+  /// The recorded titles as a standing list (user-fork
+  /// addition, 2026-11-26): the channel panel's shape
+  /// for recordings — the same targets in the recorded
+  /// list's order, the playing title carrying the
+  /// check, and a tap switching playback through
+  /// [_switchToRecord]. It stays live on the start
+  /// error, like the channel panel, so a title whose
+  /// start failed can be left from here too.
+  Widget _buildRecordPanel() {
+    final targets = widget.recordTargets!;
+    return ListView.builder(
+      itemCount: targets.length,
+      itemBuilder: (context, i) {
+        final current = i == _recordIndex;
+        return ListTile(
+          selected: current,
+          leading: Icon(current ? Icons.check : Icons.movie_outlined),
+          title: Text(
+            targets[i].name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          onTap: _zapping ? null : () => _switchToRecord(i),
+        );
+      },
     );
   }
 

@@ -1071,37 +1071,108 @@ class _TitleDetailViewState extends ConsumerState<TitleDetailView> {
         context: context,
         ref: ref,
         start: () => engine.startPlayback(title, res),
-        buildPlayer: (session) => PlayerScreen(
-          title: title.title,
-          session: session,
-          initialStart: initialStart,
-          // Leaving the player reports where the viewing
-          // stopped (plan 102), so the unit's resume point is
-          // there for the next viewing — in this app or in
-          // the official client — and the loaded list follows
-          // the report at once (plan 104 follow-up).
-          onResumePosition: (position) => reportResumePosition(
-            ref: ref,
-            reg: reg,
-            titleId: title.id,
-            position: position,
-          ),
-          // The chapter points load as the player opens
-          // (plan 112); the service validates them against
-          // the listed duration, and an empty answer leaves
-          // the player without chapter controls.
-          loadChapters: () => ref
-              .read(deviceServicesProvider(reg))
-              .titles
-              .fetchChapters(
-                title.id,
-                durationSeconds: title.scheduledDurationSeconds ?? 0,
-              ),
-        ),
+        buildPlayer: (session) {
+          final records = _recordTargetsFor(engine, initialStart);
+          return PlayerScreen(
+            title: title.title,
+            session: session,
+            initialStart: initialStart,
+            // Leaving the player reports where the viewing
+            // stopped (plan 102), so the unit's resume point is
+            // there for the next viewing — in this app or in
+            // the official client — and the loaded list follows
+            // the report at once (plan 104 follow-up).
+            onResumePosition: (position) => reportResumePosition(
+              ref: ref,
+              reg: reg,
+              titleId: title.id,
+              position: position,
+            ),
+            // The chapter points load as the player opens
+            // (plan 112); the service validates them against
+            // the listed duration, and an empty answer leaves
+            // the player without chapter controls.
+            loadChapters: () => ref
+                .read(deviceServicesProvider(reg))
+                .titles
+                .fetchChapters(
+                  title.id,
+                  durationSeconds: title.scheduledDurationSeconds ?? 0,
+                ),
+            // The recorded list rides along (user-fork
+            // addition, 2026-11-26): the player's standing
+            // list panel offers the other titles, and picking
+            // one switches playback without leaving the player.
+            recordTargets: records?.targets,
+            recordIndex: records?.index ?? 0,
+          );
+        },
         unsupportedSubject: '録画の再生',
       );
     } finally {
       if (mounted) setState(() => _starting = false);
     }
+  }
+
+  /// The record switch targets for playing [title]
+  /// (user-fork addition, 2026-11-26): the playable
+  /// titles of the recorded list — the titles provider
+  /// this tab reads, in the order its loaded stage holds
+  /// them — each with the start this view's own playback
+  /// runs, at this visit's quality, and the index of
+  /// [title] among them. Null when the list is not at
+  /// hand (its load has not landed) or it offers no
+  /// second playable title: the player then offers no
+  /// movement.
+  ///
+  /// A switch inside the player does not stop to ask the
+  /// resume question [_play] asks before its own start —
+  /// the question would break the flipping the list is
+  /// for — so a title with a recorded position opens at
+  /// it, with the usual rewind (see resumePlaybackStartOf),
+  /// and the rest open at the beginning. The title this
+  /// view opened is the one exception: its target keeps
+  /// the start the viewer just chose, so flipping away
+  /// and back lands where this viewing began, not where
+  /// the recorded point says.
+  ({List<PlayerRecordTarget> targets, int index})? _recordTargetsFor(
+    PlaybackEngine engine,
+    Duration? chosenInitialStart,
+  ) {
+    final stage = ref.read(titlesProvider(reg)).value;
+    if (stage == null) return null;
+    final useMobile = _useMobile;
+    final targets = <PlayerRecordTarget>[];
+    var index = -1;
+    for (final t in stage.titles) {
+      if (t.res.isEmpty) continue;
+      final isCurrent = t.id == title.id;
+      if (isCurrent) index = targets.length;
+      final res = (useMobile ? t.mobileRes : t.originalRes) ?? t.res.first;
+      targets.add(
+        PlayerRecordTarget(
+          name: t.title,
+          start: () => engine.startPlayback(t, res),
+          initialStart: isCurrent
+              ? chosenInitialStart
+              : (resumeStartOf(t) == null ? null : resumePlaybackStartOf(t)),
+          onResumePosition: (position) => reportResumePosition(
+            ref: ref,
+            reg: reg,
+            titleId: t.id,
+            position: position,
+          ),
+          loadChapters: () => ref
+              .read(deviceServicesProvider(reg))
+              .titles
+              .fetchChapters(
+                t.id,
+                durationSeconds: t.scheduledDurationSeconds ?? 0,
+              ),
+        ),
+      );
+    }
+    if (targets.length < 2 || index < 0) return null;
+    return (targets: targets, index: index);
   }
 }
