@@ -4,8 +4,11 @@ name: dev-build
 # main への push と手動実行 (workflow_dispatch) で走り、成果物は Actions の
 # artifact に加えて、ローリングな prerelease (タグ dev) にも載せる。
 # 利用者は Actions 画面を開かずに Releases の「開発版 (dev)」から取得できる。
-# 資産名は TorneMobileHomeBrew-dev.apk / TorneMobileHomeBrew-dev.ipa で固定し、
+# 資産名は TorneMobileHomeBrew-dev.apk / TorneMobileHomeBrew-dev.ipa /
+# TorneMobileHomeBrew-dev-windows.zip で固定し、
 # リリースは作り直さず資産の差し替えで更新する (ダウンロード URL が変わらない)。
+# デスクトップは Windows のみ CI で作る。Linux / macOS は担当が
+# tool/dev_desktop_builds.md の手順でビルドして差し替える。
 
 on:
   push:
@@ -133,9 +136,49 @@ jobs:
           path: dist/*.ipa
           if-no-files-found: error
 
+  windows:
+    name: Windows デスクトップ版
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Flutter 3.50.0
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.50.0"
+          cache: true
+
+      - name: Windows ビルド
+        run: |
+          flutter pub get
+          flutter build windows --release
+
+      # パッケージングは tool/dev_desktop_builds.md の Windows の
+      # 手順に合わせる: build\windows\x64\runner\Release\ の中身を
+      # TorneMobileHomeBrew-dev-windows フォルダに入れて zip 化し、
+      # TorneMobileHomeBrew-dev-windows.zip として掲載する
+      # (正式リリースの zip と同じトップフォルダ付きの構成)。
+      - name: 成果物の配置
+        run: |
+          New-Item -ItemType Directory -Force -Path dist, staging | Out-Null
+          Copy-Item -Recurse `
+            -Path build\windows\x64\runner\Release `
+            -Destination staging\TorneMobileHomeBrew-dev-windows
+          Compress-Archive `
+            -Path staging\TorneMobileHomeBrew-dev-windows `
+            -DestinationPath dist\TorneMobileHomeBrew-dev-windows.zip
+
+      - name: artifact アップロード
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: dist/*.zip
+          if-no-files-found: error
+
   prerelease:
     name: ローリング prerelease (dev)
-    needs: [android, ios]
+    needs: [android, ios, windows]
     runs-on: ubuntu-latest
     steps:
       - name: 成果物のダウンロード
@@ -158,7 +201,8 @@ jobs:
             echo "- 元 commit: ${SHORT_SHA}"
             echo "- Android: APK (署名は、配布用キーストアが登録されていれば配布用鍵、なければデバッグ鍵)"
             echo "- iOS: 署名なし IPA (LiveContainer 等での利用を想定)"
-            echo "- デスクトップ: Linux / Windows / macOS は CI では作らず、担当が tool/dev_desktop_builds.md の手順でビルドして差し替える (macOS は署名の都合で Mac 上のビルド + 本人署名が正規経路)"
+            echo "- Windows: デスクトップ版 zip (CI でビルド)"
+            echo "- デスクトップ (Linux / macOS): CI では作らず、担当が tool/dev_desktop_builds.md の手順でビルドして差し替える (macOS は署名の都合で Mac 上のビルド + 本人署名が正規経路)"
             echo ""
             echo "このリリース (タグ dev) はビルドのたびに最新の成果物へ差し替わります。"
           } > notes.md
@@ -180,9 +224,10 @@ jobs:
                     keep=1
                   fi
                 done
-                # デスクトップ版の dev 資産は CI では作らず、担当が
-                # tool/dev_desktop_builds.md の手順で差し替える。
-                # ここの資産整理で消さないよう保持リストに入れる。
+                # デスクトップ版の dev 資産のうち Linux / macOS は
+                # CI では作らず、担当が tool/dev_desktop_builds.md の
+                # 手順で差し替える。Windows は CI で作るようになったが、
+                # 資産整理で消さないよう保持リストに残す。
                 case "${name}" in
                   TorneMobileHomeBrew-dev-linux.tar.gz|TorneMobileHomeBrew-dev-windows.zip|TorneMobileHomeBrew-dev-macos.zip)
                     keep=1

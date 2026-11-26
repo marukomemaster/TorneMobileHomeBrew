@@ -12,6 +12,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tmhb/app/auto_record_providers.dart';
 import 'package:tmhb/app/bs_epg_providers.dart';
+import 'package:tmhb/app/cs_epg_providers.dart';
 import 'package:tmhb/app/providers.dart';
 import 'package:tmhb/app/state.dart';
 import 'package:tmhb/core/core.dart';
@@ -139,7 +140,7 @@ void main() {
     );
   }
 
-  ProviderContainer makeContainer() {
+  ProviderContainer makeContainer({EpgGuide? terrestrialGuide, EpgGuide? csGuide}) {
     schedules = _FakeSchedules();
     keyValues = InMemoryKeyValueStore();
     final bundle = DeviceServices(
@@ -158,9 +159,15 @@ void main() {
         ),
         keyValueStoreProvider.overrideWithValue(keyValues),
         deviceServicesProvider.overrideWith((ref, reg) => bundle),
-        epgGuideProvider.overrideWith((ref, reg) async => guide()),
+        epgGuideProvider.overrideWith(
+          (ref, reg) async => terrestrialGuide ?? guide(),
+        ),
         bsEpgGuideProvider.overrideWith(
           (ref, reg) async => const EpgGuide(broadcastingType: 3, services: []),
+        ),
+        csEpgGuideProvider.overrideWith(
+          (ref, reg) async =>
+              csGuide ?? const EpgGuide(broadcastingType: 4, services: []),
         ),
       ],
     );
@@ -213,5 +220,43 @@ void main() {
     // must arrive at the created reservation by itself.
     expect(await container.read(schedulesProvider(reg).future), hasLength(1));
     expect(seen.last, hasLength(1));
+  });
+
+  test('a CS guide hit is reserved with its CS channel', () async {
+    final start = DateTime.now().add(const Duration(days: 1));
+    final container = makeContainer(
+      terrestrialGuide: const EpgGuide(broadcastingType: 2, services: []),
+      csGuide: EpgGuide(
+        broadcastingType: 4,
+        services: [
+          EpgServiceGuide(
+            channel: const Channel(
+              broadcastingType: 4,
+              networkId: 7,
+              transportStreamId: 28960,
+              serviceId: 240,
+              serviceType: 1,
+              channelNumber: 240,
+              serviceName: 'ムービープラス',
+            ),
+            events: [
+              EpgEvent(
+                eventId: 77,
+                start: start,
+                duration: const Duration(minutes: 30),
+                title: 'アニメ映画',
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+    addTearDown(container.dispose);
+    await seedRules();
+    final summary = await container.read(autoRecordCheckerProvider).run();
+    expect(summary.reserved, 1);
+    expect(schedules.created, hasLength(1));
+    expect(schedules.created.single.channel.broadcastingType, 4);
+    expect(schedules.created.single.channel.serviceId, 240);
   });
 }

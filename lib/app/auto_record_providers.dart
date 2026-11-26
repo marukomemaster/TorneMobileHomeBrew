@@ -19,6 +19,7 @@ import '../ui/auto_record_policy.dart';
 import '../ui/epg_genre.dart';
 import '../ui/epg_search.dart';
 import 'bs_epg_providers.dart';
+import 'cs_epg_providers.dart';
 import 'providers.dart';
 import 'state.dart';
 
@@ -308,7 +309,11 @@ class AutoRecordChecker {
     }
 
     final hits = <EpgSearchHit>[];
-    for (final provider in [epgGuideProvider(reg), bsEpgGuideProvider(reg)]) {
+    for (final provider in [
+      epgGuideProvider(reg),
+      bsEpgGuideProvider(reg),
+      csEpgGuideProvider(reg),
+    ]) {
       try {
         final guide = await _ref.read(provider.future);
         for (final service in guide.services) {

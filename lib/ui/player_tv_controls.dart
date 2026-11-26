@@ -47,6 +47,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'player_record_policy.dart';
 import 'player_seek_policy.dart';
 import 'player_tv_controls_policy.dart';
 
@@ -77,6 +78,8 @@ class TvVideoControls extends StatefulWidget {
     required this.onSeek,
     required this.onToggleFullscreen,
     required this.isFullscreen,
+    this.onProgrammeAction,
+    this.programmeState = LiveProgrammeReservationState.none,
   });
 
   /// The player's playing / position / duration streams,
@@ -129,6 +132,25 @@ class TvVideoControls extends StatefulWidget {
   /// Whether the video is currently fullscreen, read at
   /// build time for the fullscreen button's icon.
   final bool Function() isFullscreen;
+
+  /// Works on the programme now on air (live viewing
+  /// only; user-fork addition, 2026-11-26): the player
+  /// screen's programme action for the channel being
+  /// watched — recording it, or stopping it, following
+  /// [programmeState]. Null — recordings, and live
+  /// viewing whose channel carries no programme actions
+  /// — keeps the button out of the row. A press while a
+  /// record or stop is already in flight is held back by
+  /// the screen's own gate, so the button itself never
+  /// disables.
+  final VoidCallback? onProgrammeAction;
+
+  /// The reservation state of the programme being
+  /// watched, read at build time for the programme
+  /// button's label and icon (see player_record_policy):
+  /// the screen refreshes it as the state is reported,
+  /// and these controls rebuild with the screen.
+  final LiveProgrammeReservationState programmeState;
 
   @override
   State<TvVideoControls> createState() => _TvVideoControlsState();
@@ -353,7 +375,8 @@ class _TvVideoControlsState extends State<TvVideoControls> {
 
   /// The button row: chapter and ±10 s skips flanking
   /// play/pause for recordings (the stock Material row's
-  /// arrangement), play/pause alone for live, and the
+  /// arrangement); for live, the programme button beside
+  /// play/pause while the viewing offers one; and the
   /// fullscreen button at the right end in both. Skips
   /// follow the seekable signal, disabled and dimmed
   /// while the stream is not seekable.
@@ -384,6 +407,14 @@ class _TvVideoControlsState extends State<TvVideoControls> {
           onPressed: widget.onTogglePlayPause,
           icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
         ),
+        if (widget.live && widget.onProgrammeAction != null)
+          IconButton(
+            tooltip: liveProgrammeActionLabel(widget.programmeState),
+            iconSize: 36,
+            color: Colors.white,
+            onPressed: widget.onProgrammeAction,
+            icon: Icon(liveProgrammeActionIcon(widget.programmeState)),
+          ),
         if (!widget.live)
           IconButton(
             tooltip: '10秒スキップ',

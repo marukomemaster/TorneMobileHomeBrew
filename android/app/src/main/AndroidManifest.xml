@@ -21,10 +21,25 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28"/>
+    <!-- Fire TV / Android TV support in this same APK: the TV
+         declarations stay optional — leanback is declared
+         required=false so Fire TV (which has no leanback
+         certification) still installs the app, and a touchscreen
+         is not required so remote-only devices qualify. The
+         separate "tv" flavor declares the same features in its
+         own manifest overlay; declaring them here too makes the
+         standard edition itself TV-installable. -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false"/>
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false"/>
     <application
         android:label="torne mobile HB"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:banner="@drawable/tv_banner">
         <activity
             android:name="com.markun.tmhb.MainActivity"
             android:exported="true"
@@ -42,9 +57,15 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- LAUNCHER is the phone/tablet home screen entry;
+                 LEANBACK_LAUNCHER is the Android TV / Fire TV
+                 home screen entry. Both point at this one
+                 activity, so the same APK appears and launches
+                 on TV devices too. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
             </intent-filter>
         </activity>
         <!-- FileProvider for the debug log share sheet (plan 46).

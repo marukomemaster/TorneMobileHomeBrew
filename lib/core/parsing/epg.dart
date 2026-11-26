@@ -116,11 +116,13 @@ List<_Section> _findSections(Uint8List plain, List<Channel> channels) {
         final tableId = plain[s];
         // ARIB STD-B10: 0x60..0x6f is EIT schedule *other TS*.
         // Preserve the original terrestrial EIT selection; accept the
-        // other-TS forms for the BS guide (not terrestrial).
+        // other-TS forms for the satellite guides (BS and CS alike:
+        // the measured CS dataset arrives mostly as other-TS
+        // sections, plan 137).
         final isEit = tableId == 0x4e ||
             tableId == 0x4f ||
             (tableId >= 0x50 && tableId <= 0x5f) ||
-            (ch.broadcastingType == 3 &&
+            ((ch.broadcastingType == 3 || ch.broadcastingType == 4) &&
                 tableId >= 0x60 && tableId <= 0x6f);
         if (!isEit) continue;
         if (_u16be(plain, s + 3) != ch.serviceId) continue;
@@ -196,7 +198,7 @@ EpgGuide parseEpgGuide(
     final merged = byService[ch.serviceId];
     if (merged == null || merged.isEmpty) continue;
     final events = merged.values
-        .map((event) => broadcastingType == 3
+        .map((event) => broadcastingType == 3 || broadcastingType == 4
             ? bsTitleFromExtended(event)
             : event)
         .toList()
@@ -642,12 +644,84 @@ List<EpgServiceRef> parseSatelliteEpgVersionServices(
   return out;
 }
 
-/// BS channel columns include channels without an EIT section. The original
-/// parser only lists services with an event; that hides channels entirely
-/// and makes 'missing EPG' indistinguishable from 'missing channel'.
-/// Only applies to BS; terrestrial behaviour and data are not changed.
-EpgGuide completeBsEpgGuide(EpgGuide parsed, List<Channel> channels) {
-  if (parsed.broadcastingType != 3) return parsed;
+/// Size of one record of a CS (broadcastingType 4) version
+/// table. Unlike the terrestrial / BS tables, whose records vary
+/// in length with their flags, the measured CS table (FW 2.60,
+/// 4,572 bytes, plan 137) is a fixed stride: a 12-byte header
+/// whose count reads 57, then 57 records of exactly 80 bytes —
+/// the 8-byte record header, a u16 field (0x0800 on all but one
+/// record), a 64-byte version array and 4 trailing bytes.
+const int csEpgVersionTableRecordSize = 80;
+
+/// Walks the records of a CS version table in table order.
+///
+/// The walk is bounded by the header's record count and steps
+/// the fixed [csEpgVersionTableRecordSize] stride; it stops at
+/// the first record that would run past the end of the table.
+Iterable<_VersionRecord> _walkCsEpgVersionRecords(
+    List<int> versionTable) sync* {
+  if (versionTable.length < epgVersionTableHeaderSize) return;
+  final count = _u16be(versionTable, epgVersionTableCountOffset);
+  var offset = epgVersionTableHeaderSize;
+  for (var read = 0; read < count; read++) {
+    if (offset + csEpgVersionTableRecordSize > versionTable.length) break;
+    yield _VersionRecord(
+      _u16be(versionTable, offset),
+      _u16be(versionTable, offset + 2),
+      _u16be(versionTable, offset + 4),
+      _u16be(versionTable, offset + 6),
+    );
+    offset += csEpgVersionTableRecordSize;
+  }
+}
+
+/// CS EPG version-table enumeration (broadcastingType 4,
+/// measured on FW 2.60, plan 137).
+///
+/// The CS table's records are fixed-length (see
+/// [csEpgVersionTableRecordSize]), so they are walked at that
+/// stride rather than by the flags-derived lengths the other
+/// tables use — the measured flags (0xa000 on every record)
+/// carry a bit (0x2000) the flags-derived walk treats as
+/// unknown and stops on. As with the satellite enumeration,
+/// only records whose complete service triple matches an
+/// actual VIDEO channel of this unit are kept (the CS table
+/// also lists a few data services).
+///
+/// The returned refs carry both sides (basic and extended):
+/// the CS flags do not decompose into the basic / extended
+/// block bits of the other formats, and the measured capture
+/// (the same request this enumeration feeds) set both segment
+/// bitmaps in full for every CS service and was answered with
+/// the complete dataset (10,428 unique events).
+List<EpgServiceRef> parseCsEpgVersionServices(
+    List<int> versionTable, List<Channel> channels) {
+  final known = <(int, int, int)>{
+    for (final ch in channels)
+      if (ch.serviceType == 1)
+        (ch.networkId, ch.transportStreamId, ch.serviceId),
+  };
+  final seen = <(int, int, int)>{};
+  final out = <EpgServiceRef>[];
+  for (final record in _walkCsEpgVersionRecords(versionTable)) {
+    if (record.flags == 0) continue;
+    final key = (record.networkId, record.transportStreamId, record.serviceId);
+    if (known.contains(key) && seen.add(key)) {
+      out.add(EpgServiceRef(key.$1, key.$2, key.$3));
+    }
+  }
+  return out;
+}
+
+/// Satellite channel columns include channels without an EIT section. The
+/// original parser only lists services with an event; that hides channels
+/// entirely and makes 'missing EPG' indistinguishable from 'missing
+/// channel'. Only applies to the satellite guides (BS and CS);
+/// terrestrial behaviour and data are not changed.
+EpgGuide completeSatelliteEpgGuide(EpgGuide parsed, List<Channel> channels) {
+  if (parsed.broadcastingType != 3 && parsed.broadcastingType != 4) {
+    return parsed;
+  }
   final existing = <(int, int, int), EpgServiceGuide>{
     for (final service in parsed.services)
       (

@@ -17,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../app/bs_epg_providers.dart';
+import '../app/cs_epg_providers.dart';
 import '../app/providers.dart';
 import '../app/state.dart';
 import '../core/core.dart';
@@ -190,14 +191,23 @@ class _ScheduleFormPageState extends ConsumerState<ScheduleFormPage> {
     );
   }
 
+  /// The channel-list provider of [band]: terrestrial, BS or
+  /// CS. The form's channel choice is band-parameterised
+  /// throughout, so CS slots in beside the other two (plan 137);
+  /// a CS reservation created here rides the same band-generic
+  /// create path the guide's reservations use.
+  FutureProvider<List<Channel>> _channelsOf(int band) => switch (band) {
+    bsBroadcastingType => bsChannelsProvider(widget.reg),
+    csBroadcastingType => csChannelsProvider(widget.reg),
+    _ => channelsProvider(widget.reg),
+  };
+
   // -------------------------------------------------------------------------
   // Create / time-change form
   // -------------------------------------------------------------------------
 
   Widget _buildCreateForm(BuildContext context) {
-    final channels = _selectedBand == bsBroadcastingType
-        ? ref.watch(bsChannelsProvider(widget.reg))
-        : ref.watch(channelsProvider(widget.reg));
+    final channels = ref.watch(_channelsOf(_selectedBand));
     final hddDetails = ref.watch(hddDetailsProvider(widget.reg)).value;
     final externalAvailable =
         hddDetails != null &&
@@ -243,6 +253,7 @@ class _ScheduleFormPageState extends ConsumerState<ScheduleFormPage> {
               label: Text('地デジ'),
             ),
             ButtonSegment<int>(value: bsBroadcastingType, label: Text('BS')),
+            ButtonSegment<int>(value: csBroadcastingType, label: Text('CS')),
           ],
           selected: {_selectedBand},
           onSelectionChanged: (values) => setState(() {
@@ -289,11 +300,7 @@ class _ScheduleFormPageState extends ConsumerState<ScheduleFormPage> {
             );
           },
           onRetry: () {
-            if (_selectedBand == bsBroadcastingType) {
-              ref.invalidate(bsChannelsProvider(widget.reg));
-            } else {
-              ref.invalidate(channelsProvider(widget.reg));
-            }
+            ref.invalidate(_channelsOf(_selectedBand));
           },
         ),
         const SizedBox(height: 16),
@@ -411,11 +418,7 @@ class _ScheduleFormPageState extends ConsumerState<ScheduleFormPage> {
 
   Future<void> _saveCreate() async {
     FocusScope.of(context).unfocus();
-    final channels =
-        (_selectedBand == bsBroadcastingType
-                ? ref.read(bsChannelsProvider(widget.reg))
-                : ref.read(channelsProvider(widget.reg)))
-            .value;
+    final channels = ref.read(_channelsOf(_selectedBand)).value;
     final choices = <Channel>[
       for (final c in channels ?? const <Channel>[])
         if (c.broadcastingType == _selectedBand && c.serviceType == 1) c,
@@ -484,11 +487,16 @@ class _ScheduleFormPageState extends ConsumerState<ScheduleFormPage> {
       }
       if (conflicts.isNotEmpty) {
         if (!mounted) return;
-        final otherChannels = _selectedBand == bsBroadcastingType
-            ? (ref.read(channelsProvider(widget.reg)).value ??
-                  const <Channel>[])
-            : (ref.read(bsChannelsProvider(widget.reg)).value ??
-                  const <Channel>[]);
+        final otherChannels = <Channel>[
+          for (final band in const [
+            terrestrialBroadcastingType,
+            bsBroadcastingType,
+            csBroadcastingType,
+          ])
+            if (band != _selectedBand)
+              ...(ref.read(_channelsOf(band)).value ??
+                  const <Channel>[]),
+        ];
         final proceed = await _showConflictWarning(conflicts, [
           ...choices,
           ...otherChannels,

@@ -26,7 +26,7 @@
 /// the raw fetch order only (plan 85 item 5).
 ///
 /// Plan 86.3: titles can be deleted from the detail view (and
-/// by long-pressing a list row), behind a confirmation.
+/// from the list row's menu), behind a confirmation.
 /// Protected and currently-recording titles are refused with
 /// the reason, before any confirmation. Before this the app
 /// had no title deletion at all (plan 85 item 3).
@@ -56,8 +56,29 @@
 /// it — instead of the snapshot from before the playback.
 /// The unit already held the new point; only the display
 /// lagged, which made the recording look unrecorded.
+///
+/// In the two-pane layout, a double-click on a title row
+/// starts playing it at once (owner request 2026-11-26),
+/// through the same start the detail view's 再生 button
+/// runs — the resume question included, never skipped
+/// (see playRecordedTitle below).
+///
+/// A right click (desktop) or a long press (touch) on a
+/// title row opens that title's menu — 再生 and 削除 —
+/// where before this the long press went straight to the
+/// delete confirmation (owner request 2026-11-26). The
+/// menu is the viewing screen's channel-list menu's kin:
+/// an observing pointer listener over the row, a right
+/// click answered at once and a touch hold timed from the
+/// same listener, and showMenu at the press point. 再生
+/// runs the list's own start (the detail's, resume
+/// question included); 削除 runs the shared delete flow
+/// below, guards and confirmation included.
 library;
 
+import 'dart:async';
+
+import 'package:flutter/gestures.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -146,7 +167,8 @@ Future<bool?> showResumeChoiceDialog(
 }
 
 /// The title deletion flow (plan 86.3), shared by the detail
-/// view's delete button and the list's long-press. Protected
+/// view's delete button and the list row menu's 削除.
+/// Protected
 /// titles (the unit's guard against accidental deletion) and
 /// titles still being recorded are refused with the reason and
 /// never reach the confirmation. Anything else asks first —
@@ -272,6 +294,166 @@ Future<void> reportResumePosition({
       .applyResumePoint(titleId, position.inSeconds);
 }
 
+/// Starts playing [title]: the flow the detail view's
+/// 再生 button and the title list's double-click share.
+/// The resume question comes first when the title offers
+/// a position (plan 86) — beginning a session is the
+/// expensive step, and the choice belongs before it, not
+/// after — then the engine starts at the res [useMobile]
+/// picks: the detail visit's quality choice in the
+/// detail, the saved quality from the list; the detail
+/// also starts from the saved quality, so both starts
+/// pick alike. [onStarting] runs at the moment the start
+/// itself begins, after the question: the detail view
+/// marks its button busy there (plan 35).
+Future<void> playRecordedTitle({
+  required BuildContext context,
+  required WidgetRef ref,
+  required RegisteredNasne reg,
+  required RecordedTitle title,
+  required bool useMobile,
+  VoidCallback? onStarting,
+}) async {
+  final engine = ref.read(deviceServicesProvider(reg)).playback;
+  if (!engine.isSupported) {
+    await showPlaybackUnsupportedDialog(context, subject: '録画の再生');
+    return;
+  }
+  if (title.res.isEmpty) {
+    showSnack(context, '再生可能なコンテンツがありません');
+    return;
+  }
+  final res =
+      (useMobile ? title.mobileRes : title.originalRes) ?? title.res.first;
+  // Resume (plan 86): a title the viewer stopped midway offers
+  // its recorded position. Ask before starting — beginning a
+  // session is the expensive step, and the choice belongs
+  // before it, not after.
+  var initialStart = resumeStartOf(title);
+  if (initialStart != null) {
+    final resume = await showResumeChoiceDialog(context, initialStart);
+    if (!context.mounted) return;
+    if (resume == null) return;
+    // Continuing opens a little before the recorded position:
+    // the context rewind of resumeRewind (plan 98 / 102).
+    initialStart = resume ? resumePlaybackStartOf(title) : null;
+  }
+  onStarting?.call();
+  await startPlaybackAndShowPlayer(
+    context: context,
+    ref: ref,
+    start: () => engine.startPlayback(title, res),
+    buildPlayer: (session) {
+      final records = _recordTargetsForTitle(
+        ref: ref,
+        reg: reg,
+        title: title,
+        useMobile: useMobile,
+        engine: engine,
+        chosenInitialStart: initialStart,
+      );
+      return PlayerScreen(
+        title: title.title,
+        session: session,
+        initialStart: initialStart,
+        // Leaving the player reports where the viewing
+        // stopped (plan 102), so the unit's resume point is
+        // there for the next viewing — in this app or in
+        // the official client — and the loaded list follows
+        // the report at once (plan 104 follow-up).
+        onResumePosition: (position) => reportResumePosition(
+          ref: ref,
+          reg: reg,
+          titleId: title.id,
+          position: position,
+        ),
+        // The chapter points load as the player opens
+        // (plan 112); the service validates them against
+        // the listed duration, and an empty answer leaves
+        // the player without chapter controls.
+        loadChapters: () => ref
+            .read(deviceServicesProvider(reg))
+            .titles
+            .fetchChapters(
+              title.id,
+              durationSeconds: title.scheduledDurationSeconds ?? 0,
+            ),
+        // The recorded list rides along (user-fork
+        // addition, 2026-11-26): the player's standing
+        // list panel offers the other titles, and picking
+        // one switches playback without leaving the player.
+        recordTargets: records?.targets,
+        recordIndex: records?.index ?? 0,
+      );
+    },
+    unsupportedSubject: '録画の再生',
+  );
+}
+
+/// The record switch targets for playing [title]
+/// (user-fork addition, 2026-11-26): the playable
+/// titles of the recorded list — the titles provider
+/// this tab reads, in the order its loaded stage holds
+/// them — each with the start the playback runs, at
+/// [useMobile]'s quality, and the index of [title]
+/// among them. Null when the list is not at hand (its
+/// load has not landed) or it offers no second playable
+/// title: the player then offers no movement.
+///
+/// A switch inside the player does not stop to ask the
+/// resume question [playRecordedTitle] asks before its
+/// own start — the question would break the flipping
+/// the list is for — so a title with a recorded position
+/// opens at it, with the usual rewind (see
+/// resumePlaybackStartOf), and the rest open at the
+/// beginning. The title the playback opened is the one
+/// exception: its target keeps the start the viewer just
+/// chose, so flipping away and back lands where this
+/// viewing began, not where the recorded point says.
+({List<PlayerRecordTarget> targets, int index})? _recordTargetsForTitle({
+  required WidgetRef ref,
+  required RegisteredNasne reg,
+  required RecordedTitle title,
+  required bool useMobile,
+  required PlaybackEngine engine,
+  required Duration? chosenInitialStart,
+}) {
+  final stage = ref.read(titlesProvider(reg)).value;
+  if (stage == null) return null;
+  final targets = <PlayerRecordTarget>[];
+  var index = -1;
+  for (final t in stage.titles) {
+    if (t.res.isEmpty) continue;
+    final isCurrent = t.id == title.id;
+    if (isCurrent) index = targets.length;
+    final res = (useMobile ? t.mobileRes : t.originalRes) ?? t.res.first;
+    targets.add(
+      PlayerRecordTarget(
+        name: t.title,
+        start: () => engine.startPlayback(t, res),
+        initialStart: isCurrent
+            ? chosenInitialStart
+            : (resumeStartOf(t) == null ? null : resumePlaybackStartOf(t)),
+        onResumePosition: (position) => reportResumePosition(
+          ref: ref,
+          reg: reg,
+          titleId: t.id,
+          position: position,
+        ),
+        loadChapters: () => ref
+            .read(deviceServicesProvider(reg))
+            .titles
+            .fetchChapters(
+              t.id,
+              durationSeconds: t.scheduledDurationSeconds ?? 0,
+            ),
+      ),
+    );
+  }
+  if (targets.length < 2 || index < 0) return null;
+  return (targets: targets, index: index);
+}
+
 Future<void> _showDeleteRefusal(BuildContext context, String message) {
   return showDialog<void>(
     context: context,
@@ -299,6 +481,74 @@ class TitlesScreen extends ConsumerStatefulWidget {
 class _TitlesScreenState extends ConsumerState<TitlesScreen> {
   String? _selectedId;
 
+  /// The title row last tapped in the two-pane layout,
+  /// and when (double-click start, owner request
+  /// 2026-11-26): a second tap on the same row within
+  /// the framework's double-tap window starts playing
+  /// the title at once, without the detour through the
+  /// detail pane's 再生 button. The first tap only
+  /// selects, exactly as before — selection never waits
+  /// to see whether a second tap follows, so a single
+  /// click keeps its timing and feel.
+  String? _lastTappedTitleId;
+  DateTime? _lastTappedAt;
+
+  /// A playback start launched from the list is in
+  /// flight: a further double-click must not start a
+  /// second session while the first is still starting
+  /// (the plan-35 hazard the detail's button guards
+  /// against with its own flag).
+  bool _startingFromList = false;
+
+  void _handleTitleTap(RegisteredNasne reg, RecordedTitle title, bool twoPane) {
+    if (!twoPane) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => TitleDetailPage(reg: reg, titleId: title.id),
+        ),
+      );
+      return;
+    }
+    setState(() => _selectedId = title.id);
+    final now = DateTime.now();
+    final doubleClicked =
+        _lastTappedTitleId == title.id &&
+        _lastTappedAt != null &&
+        now.difference(_lastTappedAt!) <= kDoubleTapTimeout;
+    if (!doubleClicked) {
+      _lastTappedTitleId = title.id;
+      _lastTappedAt = now;
+      return;
+    }
+    _lastTappedTitleId = null;
+    _lastTappedAt = null;
+    _startTitleFromList(reg, title);
+  }
+
+  /// Starts playing [title] from a list double-click:
+  /// the detail view's own start (see [playRecordedTitle],
+  /// resume question included) at the saved playback
+  /// quality — the quality the detail also starts from,
+  /// so the two starts pick the same res.
+  Future<void> _startTitleFromList(
+    RegisteredNasne reg,
+    RecordedTitle title,
+  ) async {
+    if (_startingFromList) return;
+    _startingFromList = true;
+    try {
+      await playRecordedTitle(
+        context: context,
+        ref: ref,
+        reg: reg,
+        title: title,
+        useMobile: ref.read(playbackQualityProvider),
+      );
+    } finally {
+      _startingFromList = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final reg = ref.watch(selectedRegistrationProvider);
@@ -325,18 +575,9 @@ class _TitlesScreenState extends ConsumerState<TitlesScreen> {
           : _TitleList(
               reg: reg,
               selectedId: _selectedId,
-              onSelect: (title, twoPane) {
-                if (twoPane) {
-                  setState(() => _selectedId = title.id);
-                } else {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) =>
-                          TitleDetailPage(reg: reg, titleId: title.id),
-                    ),
-                  );
-                }
-              },
+              onSelect: (title, twoPane) =>
+                  _handleTitleTap(reg, title, twoPane),
+              onPlay: (title) => _startTitleFromList(reg, title),
             ),
     );
   }
@@ -347,11 +588,17 @@ class _TitleList extends ConsumerStatefulWidget {
     required this.reg,
     required this.selectedId,
     required this.onSelect,
+    required this.onPlay,
   });
 
   final RegisteredNasne reg;
   final String? selectedId;
   final void Function(RecordedTitle title, bool twoPane) onSelect;
+
+  /// Starts playing a title from its row menu: the list's
+  /// own start, owned by the screen's state (its in-flight
+  /// guard lives there).
+  final void Function(RecordedTitle title) onPlay;
 
   @override
   ConsumerState<_TitleList> createState() => _TitleListState();
@@ -599,38 +846,13 @@ class _TitleListState extends ConsumerState<_TitleList> {
           itemCount: view.length,
           itemBuilder: (context, i) {
             final t = view[i];
-            return ListTile(
+            return _TitleRow(
+              reg: reg,
+              title: t,
               selected: t.id == widget.selectedId,
-              leading: _TitleLeading(reg: reg, title: t),
-              title: Text(t.title),
-              subtitle: Text(
-                '${t.scheduledStart != null ? formatDateTimeJst(t.scheduledStart!) : ''}'
-                '${t.scheduledDurationSeconds != null ? ' (${formatDurationSeconds(t.scheduledDurationSeconds!)})' : ''}'
-                '${t.channelName != null ? ' ${t.channelName}' : ''}',
-              ),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (t.protectFlag) const Icon(Icons.lock, size: 16),
-                  if (t.newFlag)
-                    const Padding(
-                      padding: EdgeInsets.only(left: 4),
-                      child: Icon(Icons.fiber_new, size: 18),
-                    ),
-                  if (t.copyCountRemaining != null)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 6),
-                      child: Text('残り ${t.copyCountRemaining} 回'),
-                    ),
-                ],
-              ),
-              onTap: () => widget.onSelect(t, twoPane),
-              onLongPress: () => deleteRecordedTitle(
-                context: context,
-                ref: ref,
-                reg: reg,
-                title: t,
-              ),
+              twoPane: twoPane,
+              onSelect: widget.onSelect,
+              onPlay: widget.onPlay,
             );
           },
         );
@@ -652,6 +874,223 @@ class _TitleListState extends ConsumerState<_TitleList> {
           ],
         );
       },
+    );
+  }
+}
+
+/// One row of the title list: the tile itself, under an
+/// observing pointer listener that opens the title's menu
+/// — 再生 and 削除 — on a right click or a touch long
+/// press (owner request 2026-11-26).
+///
+/// The arrangement is the viewing screen's (see the player
+/// screen's channel-list menu): the listener only observes
+/// — it never takes the event — so the tile's tap and the
+/// list's scroll keep every pointer event they already
+/// handle. A right click is answered at once; a touch hold
+/// is timed from the same listener, never a gesture
+/// recogniser, so the hold is not competed for. One
+/// consequence of not competing: the tile's tap still
+/// lands when the held finger lifts, so a hold that opened
+/// the menu swallows the tap that follows it — in the
+/// one-pane layout that tap would push the detail page
+/// over the menu, and in the two-pane layout it would
+/// count towards a double-click the viewer never made.
+class _TitleRow extends ConsumerStatefulWidget {
+  const _TitleRow({
+    required this.reg,
+    required this.title,
+    required this.selected,
+    required this.twoPane,
+    required this.onSelect,
+    required this.onPlay,
+  });
+
+  final RegisteredNasne reg;
+  final RecordedTitle title;
+  final bool selected;
+  final bool twoPane;
+  final void Function(RecordedTitle title, bool twoPane) onSelect;
+  final void Function(RecordedTitle title) onPlay;
+
+  @override
+  ConsumerState<_TitleRow> createState() => _TitleRowState();
+}
+
+class _TitleRowState extends ConsumerState<_TitleRow> {
+  Timer? _longPressTimer;
+  int? _longPressPointer;
+  Offset? _longPressStart;
+
+  /// The last hold opened the menu: the tap the finger's
+  /// lift still delivers is that hold's tail, not a tap on
+  /// the row, and is swallowed once. A fresh press clears
+  /// a leftover — a menu dismissed from its barrier never
+  /// delivers the tap, and the next press on the row is a
+  /// new gesture, not that hold's tail.
+  bool _swallowNextTap = false;
+
+  @override
+  void dispose() {
+    _longPressTimer?.cancel();
+    super.dispose();
+  }
+
+  /// A right click (a secondary mouse button press) on the
+  /// row opens the title's menu at the press point. A touch
+  /// press starts the hold the long press is timed from,
+  /// the same pair of arrangements as the viewing screen's
+  /// listener.
+  void _onRowPointerDown(PointerDownEvent event) {
+    if ((event.buttons & kSecondaryMouseButton) != 0) {
+      unawaited(_showTitleMenu(event.position));
+      return;
+    }
+    if ((event.buttons & kPrimaryButton) != 0) {
+      _swallowNextTap = false;
+      if (event.kind == PointerDeviceKind.touch) {
+        _longPressPointer = event.pointer;
+        _longPressStart = event.position;
+        _longPressTimer?.cancel();
+        _longPressTimer = Timer(kLongPressTimeout, _onRowLongPressFired);
+      }
+    }
+  }
+
+  /// The held touch reached the long-press timeout still
+  /// down: open the menu where the press began.
+  void _onRowLongPressFired() {
+    _longPressTimer = null;
+    final start = _longPressStart;
+    _longPressPointer = null;
+    _longPressStart = null;
+    if (start != null && mounted) {
+      _swallowNextTap = true;
+      unawaited(_showTitleMenu(start));
+    }
+  }
+
+  /// Ends a tracked hold without opening the menu: the
+  /// finger lifted or the press was cancelled before the
+  /// timeout.
+  void _onRowPointerEnd(PointerEvent event) {
+    if (event.pointer != _longPressPointer) return;
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
+    _longPressPointer = null;
+    _longPressStart = null;
+  }
+
+  /// A tracked press that wanders past the touch slop is
+  /// a scroll of the list, not a hold: it stops being a
+  /// long press.
+  void _onRowPointerMove(PointerMoveEvent event) {
+    if (event.pointer != _longPressPointer) return;
+    final start = _longPressStart;
+    if (start != null && (event.position - start).distance > kTouchSlop) {
+      _onRowPointerEnd(event);
+    }
+  }
+
+  /// The title's menu at [position], the viewing screen's
+  /// menu's shape: showMenu over a zero-size rect at the
+  /// press point. 再生 runs the list's own start — the
+  /// detail view's start, resume question included, at
+  /// the saved quality (see playRecordedTitle) — and
+  /// 削除 runs the shared delete flow, whose guards
+  /// (protected, still recording) refuse before any
+  /// confirmation and whose confirmation asks first, the
+  /// same as the detail view's delete button.
+  Future<void> _showTitleMenu(Offset position) async {
+    final title = widget.title;
+    final overlay = Overlay.of(context).context.findRenderObject()!;
+    final chosen = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(position.dx, position.dy, 0, 0),
+        Offset.zero & (overlay as RenderBox).size,
+      ),
+      items: [
+        PopupMenuItem<String>(
+          value: 'play',
+          child: Row(
+            children: [
+              const Icon(Icons.play_arrow, size: 18),
+              const SizedBox(width: 8),
+              const Text('再生'),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'delete',
+          child: Row(
+            children: [
+              const Icon(Icons.delete_outline, size: 18),
+              const SizedBox(width: 8),
+              const Text('削除'),
+            ],
+          ),
+        ),
+      ],
+    );
+    if (chosen == null || !mounted) return;
+    switch (chosen) {
+      case 'play':
+        widget.onPlay(title);
+      case 'delete':
+        await deleteRecordedTitle(
+          context: context,
+          ref: ref,
+          reg: widget.reg,
+          title: title,
+        );
+    }
+  }
+
+  void _handleTap() {
+    if (_swallowNextTap) {
+      _swallowNextTap = false;
+      return;
+    }
+    widget.onSelect(widget.title, widget.twoPane);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = widget.title;
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: _onRowPointerDown,
+      onPointerMove: _onRowPointerMove,
+      onPointerUp: _onRowPointerEnd,
+      onPointerCancel: _onRowPointerEnd,
+      child: ListTile(
+        selected: widget.selected,
+        leading: _TitleLeading(reg: widget.reg, title: t),
+        title: Text(t.title),
+        subtitle: Text(
+          '${t.scheduledStart != null ? formatDateTimeJst(t.scheduledStart!) : ''}'
+          '${t.scheduledDurationSeconds != null ? ' (${formatDurationSeconds(t.scheduledDurationSeconds!)})' : ''}'
+          '${t.channelName != null ? ' ${t.channelName}' : ''}',
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (t.protectFlag) const Icon(Icons.lock, size: 16),
+            if (t.newFlag)
+              const Padding(
+                padding: EdgeInsets.only(left: 4),
+                child: Icon(Icons.fiber_new, size: 18),
+              ),
+            if (t.copyCountRemaining != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: Text('残り ${t.copyCountRemaining} 回'),
+              ),
+          ],
+        ),
+        onTap: _handleTap,
+      ),
     );
   }
 }
@@ -1041,138 +1480,19 @@ class _TitleDetailViewState extends ConsumerState<TitleDetailView> {
 
   Future<void> _play(BuildContext context, WidgetRef ref) async {
     if (_starting) return;
-    final engine = ref.read(deviceServicesProvider(reg)).playback;
-    if (!engine.isSupported) {
-      await showPlaybackUnsupportedDialog(context, subject: '録画の再生');
-      return;
-    }
-    if (title.res.isEmpty) {
-      showSnack(context, '再生可能なコンテンツがありません');
-      return;
-    }
-    final res =
-        (_useMobile ? title.mobileRes : title.originalRes) ?? title.res.first;
-    // Resume (plan 86): a title the viewer stopped midway offers
-    // its recorded position. Ask before starting — beginning a
-    // session is the expensive step, and the choice belongs
-    // before it, not after.
-    var initialStart = resumeStartOf(title);
-    if (initialStart != null) {
-      final resume = await showResumeChoiceDialog(context, initialStart);
-      if (!context.mounted) return;
-      if (resume == null) return;
-      // Continuing opens a little before the recorded position:
-      // the context rewind of resumeRewind (plan 98 / 102).
-      initialStart = resume ? resumePlaybackStartOf(title) : null;
-    }
-    setState(() => _starting = true);
     try {
-      await startPlaybackAndShowPlayer(
+      await playRecordedTitle(
         context: context,
         ref: ref,
-        start: () => engine.startPlayback(title, res),
-        buildPlayer: (session) {
-          final records = _recordTargetsFor(engine, initialStart);
-          return PlayerScreen(
-            title: title.title,
-            session: session,
-            initialStart: initialStart,
-            // Leaving the player reports where the viewing
-            // stopped (plan 102), so the unit's resume point is
-            // there for the next viewing — in this app or in
-            // the official client — and the loaded list follows
-            // the report at once (plan 104 follow-up).
-            onResumePosition: (position) => reportResumePosition(
-              ref: ref,
-              reg: reg,
-              titleId: title.id,
-              position: position,
-            ),
-            // The chapter points load as the player opens
-            // (plan 112); the service validates them against
-            // the listed duration, and an empty answer leaves
-            // the player without chapter controls.
-            loadChapters: () => ref
-                .read(deviceServicesProvider(reg))
-                .titles
-                .fetchChapters(
-                  title.id,
-                  durationSeconds: title.scheduledDurationSeconds ?? 0,
-                ),
-            // The recorded list rides along (user-fork
-            // addition, 2026-11-26): the player's standing
-            // list panel offers the other titles, and picking
-            // one switches playback without leaving the player.
-            recordTargets: records?.targets,
-            recordIndex: records?.index ?? 0,
-          );
+        reg: reg,
+        title: title,
+        useMobile: _useMobile,
+        onStarting: () {
+          if (mounted) setState(() => _starting = true);
         },
-        unsupportedSubject: '録画の再生',
       );
     } finally {
       if (mounted) setState(() => _starting = false);
     }
-  }
-
-  /// The record switch targets for playing [title]
-  /// (user-fork addition, 2026-11-26): the playable
-  /// titles of the recorded list — the titles provider
-  /// this tab reads, in the order its loaded stage holds
-  /// them — each with the start this view's own playback
-  /// runs, at this visit's quality, and the index of
-  /// [title] among them. Null when the list is not at
-  /// hand (its load has not landed) or it offers no
-  /// second playable title: the player then offers no
-  /// movement.
-  ///
-  /// A switch inside the player does not stop to ask the
-  /// resume question [_play] asks before its own start —
-  /// the question would break the flipping the list is
-  /// for — so a title with a recorded position opens at
-  /// it, with the usual rewind (see resumePlaybackStartOf),
-  /// and the rest open at the beginning. The title this
-  /// view opened is the one exception: its target keeps
-  /// the start the viewer just chose, so flipping away
-  /// and back lands where this viewing began, not where
-  /// the recorded point says.
-  ({List<PlayerRecordTarget> targets, int index})? _recordTargetsFor(
-    PlaybackEngine engine,
-    Duration? chosenInitialStart,
-  ) {
-    final stage = ref.read(titlesProvider(reg)).value;
-    if (stage == null) return null;
-    final useMobile = _useMobile;
-    final targets = <PlayerRecordTarget>[];
-    var index = -1;
-    for (final t in stage.titles) {
-      if (t.res.isEmpty) continue;
-      final isCurrent = t.id == title.id;
-      if (isCurrent) index = targets.length;
-      final res = (useMobile ? t.mobileRes : t.originalRes) ?? t.res.first;
-      targets.add(
-        PlayerRecordTarget(
-          name: t.title,
-          start: () => engine.startPlayback(t, res),
-          initialStart: isCurrent
-              ? chosenInitialStart
-              : (resumeStartOf(t) == null ? null : resumePlaybackStartOf(t)),
-          onResumePosition: (position) => reportResumePosition(
-            ref: ref,
-            reg: reg,
-            titleId: t.id,
-            position: position,
-          ),
-          loadChapters: () => ref
-              .read(deviceServicesProvider(reg))
-              .titles
-              .fetchChapters(
-                t.id,
-                durationSeconds: t.scheduledDurationSeconds ?? 0,
-              ),
-        ),
-      );
-    }
-    if (targets.length < 2 || index < 0) return null;
-    return (targets: targets, index: index);
   }
 }

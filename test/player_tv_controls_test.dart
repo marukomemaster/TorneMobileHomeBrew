@@ -5,6 +5,10 @@
 /// raising it with the D-pad, walking its buttons, seeking
 /// from the focused seek bar, the auto-hide, and the back
 /// key putting the bar away before it leaves the screen.
+/// The live programme button (user-fork addition,
+/// 2026-11-26) is pinned here too: beside play/pause while
+/// the viewing offers the programme actions, its face
+/// following the programme's reservation state.
 ///
 /// Playback itself is faked with stream controllers and
 /// callback counters; nothing here opens a real player.
@@ -15,6 +19,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:tmhb/ui/player_record_policy.dart';
 import 'package:tmhb/ui/player_tv_controls.dart';
 import 'package:tmhb/ui/player_tv_controls_policy.dart';
 
@@ -27,12 +32,19 @@ class _Fake {
   int plays = 0;
   int pauses = 0;
   int fullscreenToggles = 0;
+  int programmeActions = 0;
   bool fullscreen = false;
   final List<Duration> skips = [];
   final List<bool> chapterSeeks = [];
   final List<Duration> seeks = [];
 
-  Widget build({bool live = false, List<Duration> chapters = const []}) {
+  Widget build({
+    bool live = false,
+    List<Duration> chapters = const [],
+    bool withProgrammeAction = false,
+    LiveProgrammeReservationState programmeState =
+        LiveProgrammeReservationState.none,
+  }) {
     return MaterialApp(
       home: Scaffold(
         body: TvVideoControls(
@@ -53,6 +65,10 @@ class _Fake {
           onSeek: seeks.add,
           onToggleFullscreen: () => fullscreenToggles++,
           isFullscreen: () => fullscreen,
+          onProgrammeAction: withProgrammeAction
+              ? () => programmeActions++
+              : null,
+          programmeState: programmeState,
         ),
       ),
     );
@@ -157,9 +173,7 @@ void main() {
     expect(fake.skips, isEmpty);
   });
 
-  testWidgets('the focused seek bar seeks with left and right', (
-    tester,
-  ) async {
+  testWidgets('the focused seek bar seeks with left and right', (tester) async {
     final fake = _Fake();
     await tester.pumpWidget(fake.build());
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
@@ -306,5 +320,76 @@ void main() {
     await tester.pump();
     expect(find.byTooltip('一時停止'), findsOneWidget);
     expect(find.byTooltip('再生'), findsNothing);
+  });
+
+  testWidgets('live: the programme button beside play/pause records', (
+    tester,
+  ) async {
+    final fake = _Fake();
+    await tester.pumpWidget(fake.build(live: true, withProgrammeAction: true));
+    // Left raises the bar on live (down belongs to zapping).
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byTooltip('録画'), findsOneWidget);
+
+    // Right from play/pause lands on the programme button.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(fake.programmeActions, 1);
+    expect(fake.toggles, 0);
+  });
+
+  testWidgets('live: the programme button follows the reservation state', (
+    tester,
+  ) async {
+    final recording = _Fake();
+    await tester.pumpWidget(
+      recording.build(
+        live: true,
+        withProgrammeAction: true,
+        programmeState: LiveProgrammeReservationState.recording,
+      ),
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byTooltip('録画停止'), findsOneWidget);
+    expect(find.byTooltip('録画'), findsNothing);
+
+    final reserved = _Fake();
+    await tester.pumpWidget(
+      reserved.build(
+        live: true,
+        withProgrammeAction: true,
+        programmeState: LiveProgrammeReservationState.reserved,
+      ),
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byTooltip('予約を取り消し'), findsOneWidget);
+  });
+
+  testWidgets('no programme button without an action, or on a recording', (
+    tester,
+  ) async {
+    final liveNoAction = _Fake();
+    await tester.pumpWidget(liveNoAction.build(live: true));
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byTooltip('全画面'), findsOneWidget);
+    expect(find.byTooltip('録画'), findsNothing);
+
+    final recording = _Fake();
+    await tester.pumpWidget(recording.build(withProgrammeAction: true));
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byTooltip('全画面'), findsOneWidget);
+    expect(find.byTooltip('録画'), findsNothing);
   });
 }

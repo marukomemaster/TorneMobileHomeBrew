@@ -21,6 +21,7 @@ import 'package:material_ui/material_ui.dart';
 import '../app/providers.dart';
 import '../app/state.dart';
 import '../app/bs_epg_providers.dart';
+import '../app/cs_epg_providers.dart';
 import '../core/core.dart';
 import 'channel_visibility.dart';
 import 'epg_genre.dart';
@@ -373,6 +374,25 @@ class _EpgScreenState extends ConsumerState<EpgScreen> {
     return DateTime.utc(jst.year, jst.month, jst.day);
   }
 
+  /// Invalidates the selected band's guide providers. A
+  /// refresh also drops the band's channel logos (terrestrial
+  /// and BS; CS fetches no logos, plan 137); the error retry
+  /// leaves logos alone, as it always has.
+  void _invalidateBandGuide(RegisteredNasne reg, {required bool refresh}) {
+    switch (_selectedBand) {
+      case bsBroadcastingType:
+        ref.invalidate(bsChannelsProvider(reg));
+        ref.invalidate(bsEpgGuideProvider(reg));
+        if (refresh) ref.invalidate(bsChannelLogosProvider(reg));
+      case csBroadcastingType:
+        ref.invalidate(csChannelsProvider(reg));
+        ref.invalidate(csEpgGuideProvider(reg));
+      default:
+        ref.invalidate(epgGuideProvider(reg));
+        if (refresh) ref.invalidate(channelLogosProvider(reg));
+    }
+  }
+
   /// The instant a JST calendar date starts.
   static DateTime _jstDayStart(DateTime jstDate) =>
       jstDate.subtract(const Duration(hours: 9));
@@ -400,14 +420,7 @@ class _EpgScreenState extends ConsumerState<EpgScreen> {
               tooltip: '更新',
               onPressed: () {
                 ref.invalidate(schedulesProvider(reg));
-                if (_selectedBand == terrestrialBroadcastingType) {
-                  ref.invalidate(epgGuideProvider(reg));
-                  ref.invalidate(channelLogosProvider(reg));
-                } else {
-                  ref.invalidate(bsChannelsProvider(reg));
-                  ref.invalidate(bsEpgGuideProvider(reg));
-                  ref.invalidate(bsChannelLogosProvider(reg));
-                }
+                _invalidateBandGuide(reg, refresh: true);
               },
             ),
         ],
@@ -425,15 +438,21 @@ class _EpgScreenState extends ConsumerState<EpgScreen> {
   }
 
   Widget _buildBandGuide(RegisteredNasne reg) {
-    final isBs = _selectedBand == bsBroadcastingType;
-    final guideAsync = isBs
-        ? ref.watch(bsEpgGuideProvider(reg))
-        : ref.watch(epgGuideProvider(reg));
-    final logos = isBs
-        ? (ref.watch(bsChannelLogosProvider(reg)).value ??
-              const <int, List<int>>{})
-        : (ref.watch(channelLogosProvider(reg)).value ??
-              const <int, List<int>>{});
+    final guideAsync = switch (_selectedBand) {
+      bsBroadcastingType => ref.watch(bsEpgGuideProvider(reg)),
+      csBroadcastingType => ref.watch(csEpgGuideProvider(reg)),
+      _ => ref.watch(epgGuideProvider(reg)),
+    };
+    // CS channel logos are not fetched (unmeasured, plan 137);
+    // the header falls back to channel names alone.
+    final logos = switch (_selectedBand) {
+      bsBroadcastingType =>
+        ref.watch(bsChannelLogosProvider(reg)).value ??
+            const <int, List<int>>{},
+      csBroadcastingType => const <int, List<int>>{},
+      _ =>
+        ref.watch(channelLogosProvider(reg)).value ?? const <int, List<int>>{},
+    };
     // Reserved marking (plan 120): the same reservation list the
     // schedules tab shows, shared through schedulesProvider, so a
     // reservation created or deleted anywhere — including from
@@ -455,6 +474,7 @@ class _EpgScreenState extends ConsumerState<EpgScreen> {
                 label: Text('地デジ'),
               ),
               ButtonSegment<int>(value: bsBroadcastingType, label: Text('BS')),
+              ButtonSegment<int>(value: csBroadcastingType, label: Text('CS')),
             ],
             selected: {_selectedBand},
             onSelectionChanged: (selection) => setState(() {
@@ -470,12 +490,7 @@ class _EpgScreenState extends ConsumerState<EpgScreen> {
               message: userMessageForError(e),
               onRetry: () {
                 ref.invalidate(schedulesProvider(reg));
-                if (isBs) {
-                  ref.invalidate(bsChannelsProvider(reg));
-                  ref.invalidate(bsEpgGuideProvider(reg));
-                } else {
-                  ref.invalidate(epgGuideProvider(reg));
-                }
+                _invalidateBandGuide(reg, refresh: false);
               },
             ),
             data: (guide) => _GuideView(

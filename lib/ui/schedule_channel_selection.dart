@@ -1,4 +1,4 @@
-/// Safe channel selection for XSRS recordings (terrestrial and BS).
+/// Safe channel selection for XSRS recordings (terrestrial, BS and CS).
 /// Keys include band, network, TS and service; a serviceId alone is not unique.
 library;
 

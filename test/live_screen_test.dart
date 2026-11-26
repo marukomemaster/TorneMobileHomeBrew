@@ -40,17 +40,47 @@ final _bands = [
     containerId: '0/video/LiveTuner/DTTB',
     title: '地上デジタル',
     channels: [
-      _channel('DTTB', '地デジ本局', networkId: 10, transportStreamId: 10, serviceId: 100),
-      _channel('DTTB', '地デジサブ局', networkId: 10, transportStreamId: 10, serviceId: 101),
-      _channel('DTTB', '地デジ他局', networkId: 10, transportStreamId: 11, serviceId: 200),
+      _channel(
+        'DTTB',
+        '地デジ本局',
+        networkId: 10,
+        transportStreamId: 10,
+        serviceId: 100,
+      ),
+      _channel(
+        'DTTB',
+        '地デジサブ局',
+        networkId: 10,
+        transportStreamId: 10,
+        serviceId: 101,
+      ),
+      _channel(
+        'DTTB',
+        '地デジ他局',
+        networkId: 10,
+        transportStreamId: 11,
+        serviceId: 200,
+      ),
     ],
   ),
   LiveBand(
     containerId: '0/video/LiveTuner/BS',
     title: 'ＢＳデジタル',
     channels: [
-      _channel('BS', 'BS本局', networkId: 4, transportStreamId: 1, serviceId: 101),
-      _channel('BS', 'BSサブ局', networkId: 4, transportStreamId: 1, serviceId: 102),
+      _channel(
+        'BS',
+        'BS本局',
+        networkId: 4,
+        transportStreamId: 1,
+        serviceId: 101,
+      ),
+      _channel(
+        'BS',
+        'BSサブ局',
+        networkId: 4,
+        transportStreamId: 1,
+        serviceId: 102,
+      ),
     ],
   ),
   LiveBand(
@@ -76,9 +106,7 @@ Future<void> _pumpLive(
         registrationStoreProvider.overrideWithValue(
           InMemoryRegistrationStore(const [_reg]),
         ),
-        liveChannelsProvider.overrideWith(
-          (ref, r) async => bands ?? _bands,
-        ),
+        liveChannelsProvider.overrideWith((ref, r) async => bands ?? _bands),
         keyValueStoreProvider.overrideWithValue(
           keyValues ?? InMemoryKeyValueStore(),
         ),
@@ -99,7 +127,10 @@ void main() {
       expect(liveBandTabLabel(band('0/video/LiveTuner/DTTB', '地上デジタル')), '地デジ');
       expect(liveBandTabLabel(band('0/video/LiveTuner/BS', 'ＢＳデジタル')), 'BS');
       expect(liveBandTabLabel(band('0/video/LiveTuner/CS', '１１０度ＣＳ')), 'CS');
-      expect(liveBandTabLabel(band('0/video/LiveTuner/XX', 'その他バンド')), 'その他バンド');
+      expect(
+        liveBandTabLabel(band('0/video/LiveTuner/XX', 'その他バンド')),
+        'その他バンド',
+      );
     });
   });
 
@@ -142,12 +173,18 @@ void main() {
       expect(find.text('BSサブ局'), findsOneWidget);
     });
 
-    testWidgets('a single band shows its channels without tabs', (
-      tester,
-    ) async {
+    testWidgets('a single band sits next to the pinned tab', (tester) async {
       await _pumpLive(tester, bands: [_bands.first]);
-      expect(find.byType(SegmentedButton<String>), findsNothing);
+      // The ピン留め tab always heads the tab row, so even a
+      // single band is listed under tabs now.
+      expect(find.byType(SegmentedButton<String>), findsOneWidget);
       expect(find.text('地デジ本局'), findsOneWidget);
+
+      // Nothing pinned yet: the pinned tab shows its guidance.
+      await tester.tap(find.text('ピン留め'));
+      await tester.pump();
+      expect(find.textContaining('ピン留めしたチャンネルがありません'), findsOneWidget);
+      expect(find.text('地デジ本局'), findsNothing);
     });
   });
 }

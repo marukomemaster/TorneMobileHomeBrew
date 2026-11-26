@@ -320,6 +320,69 @@ final hiddenChannelsProvider =
       HiddenChannelsNotifier.new,
     );
 
+/// Channels the viewer pinned as favourites (owner request
+/// 2026-11-26): the TV視聴 screen's ピン留め tab lists them
+/// across every band (the filter itself is
+/// ui/channel_pins.dart). Persisted and keyed exactly like
+/// the not-watched choice above — the same
+/// (networkId, transportStreamId, serviceId) triple in the
+/// same stored form, app-wide rather than per device: the
+/// triple names a broadcast service, the same service on
+/// every unit in the area.
+class PinnedChannelsNotifier extends Notifier<Set<String>> {
+  static const _key = 'pinned_channels';
+
+  /// The initial read-back of the persisted choice, with
+  /// the same lost-update guard as the not-watched choice:
+  /// every mutation awaits it before applying, so a restore
+  /// that lands late can never resurrect a choice a
+  /// mutation has already replaced.
+  Future<void>? _load;
+
+  @override
+  Set<String> build() {
+    final store = ref.watch(keyValueStoreProvider);
+    _load = Future.microtask(() async {
+      final restored = decode(await store.read(_key));
+      if (restored.isNotEmpty && state.isEmpty) state = restored;
+    });
+    return const {};
+  }
+
+  /// The stored form: comma-separated channel keys, the
+  /// same three-part numeric triples the not-watched
+  /// choice stores (ui/channel_visibility.dart defines the
+  /// key). Anything else is dropped, never fatal.
+  static Set<String> decode(String? raw) {
+    final keys = <String>{};
+    for (final part in (raw ?? '').split(',')) {
+      final trimmed = part.trim();
+      final fields = trimmed.split(':');
+      if (fields.length != 3) continue;
+      if (fields.every((f) => int.tryParse(f) != null)) keys.add(trimmed);
+    }
+    return keys;
+  }
+
+  Future<void> setPinned(String channelKey, bool pinned) async {
+    await _load;
+    final next = {...state};
+    if (pinned) {
+      next.add(channelKey);
+    } else {
+      next.remove(channelKey);
+    }
+    state = next;
+    final sorted = next.toList()..sort();
+    await ref.read(keyValueStoreProvider).write(_key, sorted.join(','));
+  }
+}
+
+final pinnedChannelsProvider =
+    NotifierProvider<PinnedChannelsNotifier, Set<String>>(
+      PinnedChannelsNotifier.new,
+    );
+
 /// The playback quality every viewing starts with (Discord
 /// request, 2026-11-21): false = the content's original quality
 /// (DR / 3倍 as recorded), true = the mobile transcode. One

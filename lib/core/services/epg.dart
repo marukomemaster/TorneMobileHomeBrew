@@ -77,16 +77,21 @@ class WebApiEpgService {
     // The version table enumerates the services of the unit-side
     // EPG database; the request asks for every segment of each
     // service, on the sides its version record carries (plan 24).
-    // Both parsers walk the records by their flags-derived length;
-    // the satellite one additionally keeps only services that match
-    // a VIDEO channel of this unit.
-    final services = broadcastingType == 3
-        ? parseSatelliteEpgVersionServices(versionTable, channels)
-        : parseEpgVersionServices(versionTable);
+    // The terrestrial / BS parsers walk the records by their
+    // flags-derived length; the satellite one additionally keeps
+    // only services that match a VIDEO channel of this unit. The
+    // CS table (type 4) is a different, fixed-stride format and
+    // has its own walk (plan 137).
+    final services = switch (broadcastingType) {
+      3 => parseSatelliteEpgVersionServices(versionTable, channels),
+      4 => parseCsEpgVersionServices(versionTable, channels),
+      _ => parseEpgVersionServices(versionTable),
+    };
     if (services.isEmpty) {
-      if (broadcastingType == 3) {
-        return completeBsEpgGuide(
-          const EpgGuide(broadcastingType: 3, services: []), channels);
+      if (broadcastingType == 3 || broadcastingType == 4) {
+        return completeSatelliteEpgGuide(
+            EpgGuide(broadcastingType: broadcastingType, services: const []),
+            channels);
       }
       throw NasneError.parse('webapi:EPGVersionInfoGet',
           cause: 'no service records in version table');
@@ -99,8 +104,8 @@ class WebApiEpgService {
     final plain = inflateEpgResponse(raw);
     final parsed = parseEpgGuide(plain, channels,
         broadcastingType: broadcastingType);
-    final fresh = broadcastingType == 3
-        ? completeBsEpgGuide(parsed, channels)
+    final fresh = broadcastingType == 3 || broadcastingType == 4
+        ? completeSatelliteEpgGuide(parsed, channels)
         : parsed;
     _diag(
       DiagCategory.epg,

@@ -10,22 +10,46 @@
 /// large rows, instead of one long list with band headings;
 /// the guide's subchannel switch applies to the list as well.
 ///
+/// Ahead of the band tabs sits a ピン留め tab (owner request
+/// 2026-11-26, KonomiTV-style): the channels the viewer
+/// pinned, across every band, in band order. The pin toggle
+/// is on each channel row; the choice and its filter are
+/// ui/channel_pins.dart.
+///
 /// The programme information is the snapshot the DIDL items
 /// carried when the list was fetched; the refresh action
 /// re-fetches it (a programme boundary does not update an
 /// already listed item).
+///
+/// The player's programme actions work from here (user-fork
+/// addition, 2026-11-26): a zap target on any band's channel
+/// carries the record / state / stop actions for the
+/// programme now on air on that channel, resolved in the
+/// programme guide at the moment they run (see
+/// ui/player_record_policy.dart). CS joined the covered
+/// bands when its guide landed (plan 137).
+///
+/// In the two-pane layout, a double-click on a channel row
+/// starts viewing at once (owner request 2026-11-26),
+/// through the same start the detail pane's 視聴 button
+/// runs (see startLiveChannelViewing below).
 library;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../app/bs_epg_providers.dart';
+import '../app/cs_epg_providers.dart';
 import '../app/providers.dart';
 import '../app/state.dart';
 import '../core/core.dart';
+import 'channel_pins.dart';
 import 'channel_visibility.dart';
 import 'epg_subchannel_visibility.dart';
 import 'format.dart';
 import 'playback_launcher.dart';
+import 'player_record_policy.dart';
 import 'player_screen.dart';
 import 'schedules_screen.dart' show twoPaneBreakpoint;
 import 'tv_focus.dart';
@@ -44,6 +68,79 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
   /// Container id of the band whose tab is selected; null
   /// means the first band with channels.
   String? _selectedBandId;
+
+  /// The channel row last tapped in the two-pane layout,
+  /// and when (double-click start, owner request
+  /// 2026-11-26): a second tap on the same row within the
+  /// framework's double-tap window starts viewing at once,
+  /// without the detour through the detail pane's 視聴
+  /// button. The first tap only selects, exactly as
+  /// before — selection never waits to see whether a
+  /// second tap follows, so a single click keeps its
+  /// timing and feel.
+  String? _lastTappedChannelId;
+  DateTime? _lastTappedAt;
+
+  /// A viewing start launched from the list is in flight:
+  /// a further double-click must not start a second
+  /// session while the first is still starting (the
+  /// plan-35 hazard the detail's button guards against
+  /// with its own flag).
+  bool _startingFromList = false;
+
+  void _handleChannelTap(
+    RegisteredNasne reg,
+    LiveChannel channel,
+    bool twoPane,
+  ) {
+    if (!twoPane) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) =>
+              LiveChannelDetailPage(reg: reg, channelId: channel.id),
+        ),
+      );
+      return;
+    }
+    setState(() => _selectedId = channel.id);
+    final now = DateTime.now();
+    final doubleClicked =
+        _lastTappedChannelId == channel.id &&
+        _lastTappedAt != null &&
+        now.difference(_lastTappedAt!) <= kDoubleTapTimeout;
+    if (!doubleClicked) {
+      _lastTappedChannelId = channel.id;
+      _lastTappedAt = now;
+      return;
+    }
+    _lastTappedChannelId = null;
+    _lastTappedAt = null;
+    _startViewingFromList(reg, channel);
+  }
+
+  /// Starts viewing [channel] from a list double-click:
+  /// the detail pane's own start (see
+  /// [startLiveChannelViewing]) at the saved playback
+  /// quality — the quality the detail pane also starts
+  /// from, so the two starts pick the same res.
+  Future<void> _startViewingFromList(
+    RegisteredNasne reg,
+    LiveChannel channel,
+  ) async {
+    if (_startingFromList) return;
+    _startingFromList = true;
+    try {
+      await startLiveChannelViewing(
+        context: context,
+        ref: ref,
+        reg: reg,
+        channel: channel,
+        useMobile: ref.read(playbackQualityProvider),
+      );
+    } finally {
+      _startingFromList = false;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -71,24 +168,17 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
               selectedBandId: _selectedBandId,
               onSelectBand: (bandId) =>
                   setState(() => _selectedBandId = bandId),
-              onSelect: (channel, twoPane) {
-                if (twoPane) {
-                  setState(() => _selectedId = channel.id);
-                } else {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => LiveChannelDetailPage(
-                        reg: reg,
-                        channelId: channel.id,
-                      ),
-                    ),
-                  );
-                }
-              },
+              onSelect: (channel, twoPane) =>
+                  _handleChannelTap(reg, channel, twoPane),
             ),
     );
   }
 }
+
+/// The tab value of the ピン留め tab. A band's tab value is
+/// its container id — always a LiveTuner path carrying
+/// slashes — so this bare word can never collide with one.
+const String livePinnedTabValue = 'pinned';
 
 /// The short tab label of a live band (plan 95): the guide's
 /// 地デジ / BS wording for the measured bands, CS alike; an
@@ -120,6 +210,7 @@ class _LiveList extends ConsumerWidget {
     final bands = ref.watch(liveChannelsProvider(reg));
     final showSubchannels = ref.watch(showSubchannelsProvider);
     final hiddenChannels = ref.watch(hiddenChannelsProvider);
+    final pinnedChannels = ref.watch(pinnedChannelsProvider);
     return asyncSection(bands, (list) {
       // The guide's subchannel switch applies to this list
       // too (plan 95): the same setting, not a new one. The
@@ -136,15 +227,28 @@ class _LiveList extends ConsumerWidget {
       }
       // One tab per band that actually offers a channel; the
       // selected band survives refreshes by container id and
-      // falls back to the first tab when it is gone.
+      // falls back to the first tab when it is gone. Ahead of
+      // them sits the ピン留め tab, selected under its own
+      // value rather than a container id.
       final tabBands = [
         for (final band in visibleBands)
           if (band.channels.isNotEmpty) band,
       ];
-      final selectedBand = tabBands.firstWhere(
-        (band) => band.containerId == selectedBandId,
-        orElse: () => tabBands.first,
-      );
+      final pinnedSelected = selectedBandId == livePinnedTabValue;
+      final selectedBand = pinnedSelected
+          ? null
+          : tabBands.firstWhere(
+              (band) => band.containerId == selectedBandId,
+              orElse: () => tabBands.first,
+            );
+      // The rows on screen: on the ピン留め tab, the pinned
+      // channels across every band — read off the already
+      // filtered bands, so a not-watched channel stays out
+      // even while it is pinned — and on a band tab, the
+      // selected band's channels.
+      final listedChannels = pinnedSelected
+          ? pinnedLiveChannels(visibleBands, pinnedChannels)
+          : selectedBand!.channels;
       return LayoutBuilder(
         builder: (context, constraints) {
           // One width decides both the layout and the tap
@@ -157,7 +261,7 @@ class _LiveList extends ConsumerWidget {
           final twoPane = constraints.maxWidth >= twoPaneBreakpoint;
           final listView = ListView(
             children: [
-              for (final channel in selectedBand.channels)
+              for (final channel in listedChannels)
                 ListTile(
                   selected: channel.id == selectedId,
                   // The rows are tightened (owner request
@@ -182,32 +286,54 @@ class _LiveList extends ConsumerWidget {
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
+                  trailing: _pinToggle(ref, channel, pinnedChannels),
                   onTap: () => onSelect(channel, twoPane),
                 ),
             ],
           );
+          // The ピン留め tab before anything is pinned: the
+          // same centred empty form as the no-channels case,
+          // saying how a channel gets pinned.
+          final listArea = pinnedSelected && listedChannels.isEmpty
+              ? const Center(
+                  child: Text(
+                    'ピン留めしたチャンネルがありません\n'
+                    '各チャンネルのピンのアイコンから登録できます',
+                    textAlign: TextAlign.center,
+                  ),
+                )
+              : listView;
+          final segments = <ButtonSegment<String>>[
+            const ButtonSegment<String>(
+              value: livePinnedTabValue,
+              label: Text('ピン留め'),
+            ),
+            for (final band in tabBands)
+              ButtonSegment<String>(
+                value: band.containerId,
+                label: Text(liveBandTabLabel(band)),
+              ),
+          ];
           final content = Column(
             children: [
-              if (tabBands.length > 1)
+              if (segments.length > 1)
                 Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12,
                     vertical: 8,
                   ),
                   child: SegmentedButton<String>(
-                    segments: [
-                      for (final band in tabBands)
-                        ButtonSegment<String>(
-                          value: band.containerId,
-                          label: Text(liveBandTabLabel(band)),
-                        ),
-                    ],
-                    selected: {selectedBand.containerId},
+                    segments: segments,
+                    selected: {
+                      pinnedSelected
+                          ? livePinnedTabValue
+                          : selectedBand!.containerId,
+                    },
                     onSelectionChanged: (selection) =>
                         onSelectBand(selection.first),
                   ),
                 ),
-              Expanded(child: listView),
+              Expanded(child: listArea),
             ],
           );
           if (!twoPane) return content;
@@ -230,6 +356,35 @@ class _LiveList extends ConsumerWidget {
         },
       );
     }, onRetry: () => ref.invalidate(liveChannelsProvider(reg)));
+  }
+
+  /// The row's pin toggle: filled while the channel is
+  /// pinned, outlined otherwise, and the choice persists
+  /// through the pinned-channels notifier. A channel whose
+  /// item carried no broadcast identity cannot be pinned
+  /// (the pin filter's rule), so its toggle is shown
+  /// disabled rather than pretending it works — the same
+  /// treatment as the 見ないチャンネル page's switches.
+  Widget _pinToggle(
+    WidgetRef ref,
+    LiveChannel channel,
+    Set<String> pinnedChannels,
+  ) {
+    final key = liveChannelKeyOf(channel);
+    if (key == null) {
+      return const IconButton(
+        icon: Icon(Icons.push_pin_outlined),
+        tooltip: 'ピン留め',
+        onPressed: null,
+      );
+    }
+    final pinned = pinnedChannels.contains(key);
+    return IconButton(
+      icon: Icon(pinned ? Icons.push_pin : Icons.push_pin_outlined),
+      tooltip: pinned ? 'ピン留めを外す' : 'ピン留め',
+      onPressed: () =>
+          ref.read(pinnedChannelsProvider.notifier).setPinned(key, !pinned),
+    );
   }
 }
 
@@ -304,6 +459,391 @@ Future<void> openLiveChannelForEpg(
       builder: (_) => LiveChannelDetailPage(reg: reg, channelId: live.id),
     ),
   );
+}
+
+/// Starts viewing [channel]: the flow the detail pane's
+/// 視聴 button and the channel list's double-click share.
+/// The engine's live start runs at the res [useMobile]
+/// picks — the detail visit's quality choice in the
+/// detail, the saved quality from the list; the detail
+/// also starts from the saved quality, so both starts
+/// pick alike — with the zap targets of the channel's
+/// band, under the shared launcher's failure handling.
+/// [onStarting] runs at the moment the start itself
+/// begins, after the pre-checks have passed: the detail
+/// view marks its button busy there (plan 35).
+Future<void> startLiveChannelViewing({
+  required BuildContext context,
+  required WidgetRef ref,
+  required RegisteredNasne reg,
+  required LiveChannel channel,
+  required bool useMobile,
+  VoidCallback? onStarting,
+}) async {
+  final engine = ref.read(deviceServicesProvider(reg)).playback;
+  if (!engine.isSupported) {
+    await showPlaybackUnsupportedDialog(context, subject: 'TV視聴');
+    return;
+  }
+  if (channel.res.isEmpty) {
+    showSnack(context, '視聴可能なコンテンツがありません');
+    return;
+  }
+  final res =
+      (useMobile ? channel.mobileRes : channel.originalRes) ??
+      channel.res.first;
+  onStarting?.call();
+  await startPlaybackAndShowPlayer(
+    context: context,
+    ref: ref,
+    start: () => engine.startLivePlayback(channel, res),
+    buildPlayer: (session) {
+      final zap = _liveZapTargetsFor(
+        ref: ref,
+        reg: reg,
+        channel: channel,
+        useMobile: useMobile,
+        engine: engine,
+      );
+      return PlayerScreen(
+        title: channel.channelName ?? channel.programTitle,
+        session: session,
+        live: true,
+        zapTargets: zap?.targets,
+        zapIndex: zap?.index ?? 0,
+      );
+    },
+    unsupportedSubject: 'TV視聴',
+    startFailureMessage: '視聴を開始できませんでした',
+  );
+}
+
+/// The zap targets for viewing [channel] (channel
+/// movement inside the player, owner request
+/// 2026-11-23): the playable channels of the same band,
+/// in the order the live list shows them — the
+/// subchannel setting applied, as the list applies it —
+/// each with the start the viewing runs, at [useMobile]'s
+/// quality, and the index of [channel] among them. Null
+/// when the channel list is not at hand (its fetch has
+/// not landed) or the band offers no second playable
+/// channel: the player then keeps its plain title and
+/// offers no movement.
+({List<PlayerZapTarget> targets, int index})? _liveZapTargetsFor({
+  required WidgetRef ref,
+  required RegisteredNasne reg,
+  required LiveChannel channel,
+  required bool useMobile,
+  required PlaybackEngine engine,
+}) {
+  final bands = ref.read(liveChannelsProvider(reg)).value;
+  if (bands == null) return null;
+  // The same two filters the list applies, so zapping
+  // inside the player walks the channels the viewer
+  // actually sees — a not-watched channel is never zapped
+  // into either.
+  final visible = liveBandsWithHiddenChannels(
+    liveBandsWithSubchannelSetting(bands, ref.read(showSubchannelsProvider)),
+    ref.read(hiddenChannelsProvider),
+  );
+  for (final band in visible) {
+    if (!band.channels.any((c) => c.id == channel.id)) continue;
+    final targets = <PlayerZapTarget>[];
+    var index = -1;
+    for (final c in band.channels) {
+      if (c.res.isEmpty) continue;
+      if (c.id == channel.id) index = targets.length;
+      final res = (useMobile ? c.mobileRes : c.originalRes) ?? c.res.first;
+      final actions = _liveProgrammeActionsFor(
+        ref: ref,
+        reg: reg,
+        band: band,
+        channel: c,
+      );
+      targets.add(
+        PlayerZapTarget(
+          name: c.channelName ?? c.programTitle,
+          start: () => engine.startLivePlayback(c, res),
+          record: actions?.record,
+          programmeState: actions?.programmeState,
+          stopProgramme: actions?.stopProgramme,
+        ),
+      );
+    }
+    if (targets.length < 2 || index < 0) return null;
+    return (targets: targets, index: index);
+  }
+  return null;
+}
+
+/// The programme actions a zap target for [channel] in
+/// [band] carries (user-fork addition, 2026-11-26):
+/// record, state and stop for the programme now on air
+/// on the channel, as one set (see PlayerZapTarget).
+/// Only the terrestrial and BS bands carry them — the
+/// programme guide, which the actions resolve the
+/// on-air programme in, has no CS side, the same limit
+/// the reservation form has — and only a channel with
+/// its full broadcast identity can be found in the
+/// guide at all.
+({
+  Future<LiveRecordResult> Function() record,
+  Future<LiveProgrammeReservationState> Function() programmeState,
+  Future<LiveRecordStopResult> Function() stopProgramme,
+})?
+_liveProgrammeActionsFor({
+  required WidgetRef ref,
+  required RegisteredNasne reg,
+  required LiveBand band,
+  required LiveChannel channel,
+}) {
+  final broadcastingType = switch (liveBandKind(band)) {
+    LiveBandKind.terrestrial => terrestrialBroadcastingType,
+    LiveBandKind.bs => bsBroadcastingType,
+    LiveBandKind.cs => csBroadcastingType,
+    _ => null,
+  };
+  if (broadcastingType == null ||
+      channel.networkId == null ||
+      channel.transportStreamId == null ||
+      channel.serviceId == null) {
+    return null;
+  }
+  return (
+    record: () => _recordOnAirProgramme(
+      ref: ref,
+      reg: reg,
+      channel: channel,
+      broadcastingType: broadcastingType,
+    ),
+    programmeState: () => _onAirProgrammeState(
+      ref: ref,
+      reg: reg,
+      channel: channel,
+      broadcastingType: broadcastingType,
+    ),
+    stopProgramme: () => _stopOnAirProgramme(
+      ref: ref,
+      reg: reg,
+      channel: channel,
+      broadcastingType: broadcastingType,
+    ),
+  );
+}
+
+/// The programme now on air on [channel], resolved in
+/// the programme guide at the moment of the call: the
+/// guide service carrying the channel's broadcast
+/// identity, and the event in it that covers now (see
+/// player_record_policy). Null when the guide cannot
+/// be fetched, has no such service, or no event in it
+/// is on air. The guide is read through its provider
+/// each time, so an action run after a zap — or long
+/// into a viewing — resolves the programme then on
+/// air, not the one at open.
+Future<({Channel channel, EpgEvent event})?> _onAirProgramme({
+  required WidgetRef ref,
+  required RegisteredNasne reg,
+  required LiveChannel channel,
+  required int broadcastingType,
+}) async {
+  final EpgGuide guide;
+  try {
+    guide = await ref.read(
+      (switch (broadcastingType) {
+        bsBroadcastingType => bsEpgGuideProvider(reg),
+        csBroadcastingType => csEpgGuideProvider(reg),
+        _ => epgGuideProvider(reg),
+      }).future,
+    );
+  } catch (e) {
+    ref.read(diagLogProvider)(
+      DiagCategory.ui,
+      'live: programme guide fetch for the record action failed: $e',
+    );
+    return null;
+  }
+  final service = guideServiceForLiveChannel(
+    guide,
+    networkId: channel.networkId,
+    transportStreamId: channel.transportStreamId,
+    serviceId: channel.serviceId,
+  );
+  if (service == null) return null;
+  final event = onAirEvent(service.events, DateTime.now());
+  if (event == null) return null;
+  return (channel: service.channel, event: event);
+}
+
+/// Creates the reservation for a programme-guide
+/// [event] on its guide [channel]: the guide's own
+/// creation path, driven as the auto-record checker
+/// drives it — the candidate built from the event as a
+/// guide reservation is (see [liveRecordCandidate]), an
+/// existing reservation for the event reported instead
+/// of duplicated, the device conflict check before the
+/// create, and the reservation list invalidated after
+/// it, so the 予約 screen shows the new reservation
+/// without a manual refresh. An event that has already
+/// started is reserved with its true start, as the
+/// guide's form sends it (see player_record_policy).
+///
+/// The one create path behind every one-press record
+/// action the fork adds: the live player's record
+/// action resolves the on-air event and drives this
+/// (see [_recordOnAirProgramme]), and the programme
+/// search results' row menu drives it with the hit's
+/// event (see epg_search_screen.dart).
+Future<LiveRecordResult> recordGuideEvent({
+  required WidgetRef ref,
+  required RegisteredNasne reg,
+  required Channel channel,
+  required EpgEvent event,
+}) async {
+  final services = ref.read(deviceServicesProvider(reg));
+  final candidate = liveRecordCandidate(channel: channel, event: event);
+  try {
+    final existing = await ref.read(schedulesProvider(reg).future);
+    if (reservationForEvent(existing, channel: channel, event: event) !=
+        null) {
+      return LiveRecordResult.alreadyReserved;
+    }
+    final conflicts = await services.schedules.checkConflicts(candidate);
+    if (conflicts.isNotEmpty) return LiveRecordResult.conflict;
+    await services.schedules.createSchedule(candidate);
+  } catch (e) {
+    ref.read(diagLogProvider)(
+      DiagCategory.ui,
+      'record: creating the guide event reservation failed: $e',
+    );
+    return LiveRecordResult.failed;
+  }
+  ref.invalidate(schedulesProvider(reg));
+  return LiveRecordResult.created;
+}
+
+/// Creates the reservation for the programme now on
+/// air on [channel] (user-fork addition, 2026-11-26):
+/// the on-air event resolved in the guide, then the
+/// shared guide-event create (see [recordGuideEvent]).
+Future<LiveRecordResult> _recordOnAirProgramme({
+  required WidgetRef ref,
+  required RegisteredNasne reg,
+  required LiveChannel channel,
+  required int broadcastingType,
+}) async {
+  final resolved = await _onAirProgramme(
+    ref: ref,
+    reg: reg,
+    channel: channel,
+    broadcastingType: broadcastingType,
+  );
+  if (resolved == null) return LiveRecordResult.unavailable;
+  return recordGuideEvent(
+    ref: ref,
+    reg: reg,
+    channel: resolved.channel,
+    event: resolved.event,
+  );
+}
+
+/// The reservation state of the programme now on air
+/// on [channel] (user-fork addition, 2026-11-26): the
+/// reservation the on-air event owns, read from the
+/// reservation list and classified against now (see
+/// player_record_policy). Anything unreadable answers
+/// none: the controls then offer recording, and a
+/// press re-checks before it creates.
+Future<LiveProgrammeReservationState> _onAirProgrammeState({
+  required WidgetRef ref,
+  required RegisteredNasne reg,
+  required LiveChannel channel,
+  required int broadcastingType,
+}) async {
+  final resolved = await _onAirProgramme(
+    ref: ref,
+    reg: reg,
+    channel: channel,
+    broadcastingType: broadcastingType,
+  );
+  if (resolved == null) return LiveProgrammeReservationState.none;
+  final List<RecordSchedule> existing;
+  try {
+    existing = await ref.read(schedulesProvider(reg).future);
+  } catch (_) {
+    return LiveProgrammeReservationState.none;
+  }
+  return liveProgrammeReservationState(
+    reservation: reservationForEvent(
+      existing,
+      channel: resolved.channel,
+      event: resolved.event,
+    ),
+    now: DateTime.now(),
+  );
+}
+
+/// Stops the programme now on air on [channel]
+/// (user-fork addition, 2026-11-26): deletes its
+/// reservation through the reservation list's own
+/// delete — the same call the 予約 screen's delete
+/// makes — and invalidates the list, as that delete
+/// does. Whether the outcome is worded as stopping a
+/// recording or cancelling a reservation follows the
+/// state the found reservation is in at the delete.
+Future<LiveRecordStopResult> _stopOnAirProgramme({
+  required WidgetRef ref,
+  required RegisteredNasne reg,
+  required LiveChannel channel,
+  required int broadcastingType,
+}) async {
+  final resolved = await _onAirProgramme(
+    ref: ref,
+    reg: reg,
+    channel: channel,
+    broadcastingType: broadcastingType,
+  );
+  if (resolved == null) return LiveRecordStopResult.gone;
+  final List<RecordSchedule> existing;
+  try {
+    existing = await ref.read(schedulesProvider(reg).future);
+  } catch (e) {
+    ref.read(diagLogProvider)(
+      DiagCategory.ui,
+      'live: reading the reservations for the stop action failed: $e',
+    );
+    return LiveRecordStopResult.failed;
+  }
+  final reservation = reservationForEvent(
+    existing,
+    channel: resolved.channel,
+    event: resolved.event,
+  );
+  if (reservation == null) return LiveRecordStopResult.gone;
+  final recording =
+      liveProgrammeReservationState(
+        reservation: reservation,
+        now: DateTime.now(),
+      ) ==
+      LiveProgrammeReservationState.recording;
+  try {
+    await ref
+        .read(deviceServicesProvider(reg))
+        .schedules
+        .deleteSchedule(reservation.id);
+  } catch (e) {
+    ref.read(diagLogProvider)(
+      DiagCategory.ui,
+      'live: stopping the on-air programme failed: $e',
+    );
+    return recording
+        ? LiveRecordStopResult.stopFailed
+        : LiveRecordStopResult.cancelFailed;
+  }
+  ref.invalidate(schedulesProvider(reg));
+  return recording
+      ? LiveRecordStopResult.stopped
+      : LiveRecordStopResult.cancelled;
 }
 
 /// Detail page for narrow layouts.
@@ -460,85 +1000,19 @@ class _LiveChannelDetailViewState extends ConsumerState<LiveChannelDetailView> {
 
   Future<void> _watch(BuildContext context, WidgetRef ref) async {
     if (_starting) return;
-    final engine = ref.read(deviceServicesProvider(reg)).playback;
-    if (!engine.isSupported) {
-      await showPlaybackUnsupportedDialog(context, subject: 'TV視聴');
-      return;
-    }
-    if (channel.res.isEmpty) {
-      showSnack(context, '視聴可能なコンテンツがありません');
-      return;
-    }
-    final res =
-        (_useMobile ? channel.mobileRes : channel.originalRes) ??
-        channel.res.first;
-    setState(() => _starting = true);
     try {
-      await startPlaybackAndShowPlayer(
+      await startLiveChannelViewing(
         context: context,
         ref: ref,
-        start: () => engine.startLivePlayback(channel, res),
-        buildPlayer: (session) {
-          final zap = _zapTargetsFor(engine);
-          return PlayerScreen(
-            title: channel.channelName ?? channel.programTitle,
-            session: session,
-            live: true,
-            zapTargets: zap?.targets,
-            zapIndex: zap?.index ?? 0,
-          );
+        reg: reg,
+        channel: channel,
+        useMobile: _useMobile,
+        onStarting: () {
+          if (mounted) setState(() => _starting = true);
         },
-        unsupportedSubject: 'TV視聴',
-        startFailureMessage: '視聴を開始できませんでした',
       );
     } finally {
       if (mounted) setState(() => _starting = false);
     }
-  }
-
-  /// The zap targets for viewing [channel] (channel
-  /// movement inside the player, owner request
-  /// 2026-11-23): the playable channels of the same band,
-  /// in the order the live list shows them — the
-  /// subchannel setting applied, as the list applies it —
-  /// each with the start this view's own viewing runs, at
-  /// this visit's quality, and the index of [channel]
-  /// among them. Null when the channel list is not at hand
-  /// (its fetch has not landed) or the band offers no
-  /// second playable channel: the player then keeps its
-  /// plain title and offers no movement.
-  ({List<PlayerZapTarget> targets, int index})? _zapTargetsFor(
-    PlaybackEngine engine,
-  ) {
-    final bands = ref.read(liveChannelsProvider(reg)).value;
-    if (bands == null) return null;
-    // The same two filters the list applies, so zapping
-    // inside the player walks the channels the viewer
-    // actually sees — a not-watched channel is never zapped
-    // into either.
-    final visible = liveBandsWithHiddenChannels(
-      liveBandsWithSubchannelSetting(bands, ref.read(showSubchannelsProvider)),
-      ref.read(hiddenChannelsProvider),
-    );
-    for (final band in visible) {
-      if (!band.channels.any((c) => c.id == channel.id)) continue;
-      final useMobile = _useMobile;
-      final targets = <PlayerZapTarget>[];
-      var index = -1;
-      for (final c in band.channels) {
-        if (c.res.isEmpty) continue;
-        if (c.id == channel.id) index = targets.length;
-        final res = (useMobile ? c.mobileRes : c.originalRes) ?? c.res.first;
-        targets.add(
-          PlayerZapTarget(
-            name: c.channelName ?? c.programTitle,
-            start: () => engine.startLivePlayback(c, res),
-          ),
-        );
-      }
-      if (targets.length < 2 || index < 0) return null;
-      return (targets: targets, index: index);
-    }
-    return null;
   }
 }

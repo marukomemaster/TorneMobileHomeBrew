@@ -201,6 +201,7 @@ import 'player_chapter_policy.dart';
 import 'player_cm_autoskip_policy.dart';
 import 'player_error_policy.dart';
 import 'player_hwdec_policy.dart';
+import 'player_record_policy.dart';
 import 'player_record_switch_policy.dart';
 import 'player_resume_policy.dart';
 import 'player_safe_area_policy.dart';
@@ -210,6 +211,7 @@ import 'player_teardown_policy.dart';
 import 'player_track_policy.dart';
 import 'player_tv_controls.dart';
 import 'player_zap_policy.dart';
+import 'widgets.dart';
 
 /// A channel the viewer can move to from inside the
 /// player (live viewing only): the name the header strip
@@ -219,7 +221,13 @@ import 'player_zap_policy.dart';
 /// is starting the new channel's session after stopping
 /// the old one (see PlaybackEngine.startLivePlayback).
 class PlayerZapTarget {
-  const PlayerZapTarget({required this.name, required this.start});
+  const PlayerZapTarget({
+    required this.name,
+    required this.start,
+    this.record,
+    this.programmeState,
+    this.stopProgramme,
+  });
 
   /// Display name: the channel's name, as the player's
   /// title for that channel.
@@ -227,6 +235,42 @@ class PlayerZapTarget {
 
   /// Starts this channel's playback session.
   final Future<PlaybackSession> Function() start;
+
+  /// Records the programme now on air on this channel
+  /// (user-fork addition, 2026-11-26): the live side's
+  /// reservation creation for the channel's current
+  /// programme, run by the player's record button and
+  /// the channel list menu's record item, and answering
+  /// what the attempt came to (see player_record_policy).
+  /// Null where the channel's programme cannot be
+  /// resolved to a reservation — a band the programme
+  /// guide does not carry, or a channel without broadcast
+  /// identity: the player then offers no record action
+  /// while this channel is being watched.
+  ///
+  /// [programmeState] and [stopProgramme] come with this
+  /// one as a set: all three are the channel's programme
+  /// actions, or the channel carries none of them.
+  final Future<LiveRecordResult> Function()? record;
+
+  /// The reservation state of the programme now on air
+  /// on this channel (user-fork addition, 2026-11-26):
+  /// answered by the live side from the reservation
+  /// list, and asked by the player when this channel
+  /// becomes the watched one and after each record /
+  /// stop, so the record controls can offer stopping a
+  /// recording in progress — or cancelling a reservation
+  /// — instead of recording (see player_record_policy).
+  final Future<LiveProgrammeReservationState> Function()? programmeState;
+
+  /// Stops the recording of, or cancels the reservation
+  /// for, the programme now on air on this channel
+  /// (user-fork addition, 2026-11-26): the live side
+  /// deletes the programme's reservation through the
+  /// reservation list's own delete path, after the
+  /// player's confirmation, and answers what the attempt
+  /// came to (see player_record_policy).
+  final Future<LiveRecordStopResult> Function()? stopProgramme;
 }
 
 /// A recording the viewer can move to from inside the
@@ -600,6 +644,31 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// to land, so two opens never race on the one player.
   bool _opening = false;
 
+  /// A record or stop request is in flight (the live
+  /// side is creating or deleting the reservation for
+  /// the programme being watched): the record controls
+  /// hold off meanwhile, so a second press cannot race a
+  /// duplicate create or delete against the unit.
+  bool _recordBusy = false;
+
+  /// The reservation state of the programme being
+  /// watched, as the current channel's state query last
+  /// reported it (see [PlayerZapTarget.programmeState]):
+  /// decides whether the record controls offer recording
+  /// the programme, stopping its recording, or cancelling
+  /// its reservation. Asked when the screen opens, when
+  /// a channel switch lands, and after each record /
+  /// stop (see _refreshProgrammeState).
+  LiveProgrammeReservationState _programmeState =
+      LiveProgrammeReservationState.none;
+
+  /// The ticket of the newest programme-state query: a
+  /// query that lands after a newer one started — the
+  /// viewer zapped on, or an action refreshed the state —
+  /// must not overwrite the state of the programme now
+  /// being watched.
+  int _programmeStateTicket = 0;
+
   /// Whether channel movement is offered (see
   /// player_zap_policy).
   bool get _canZap =>
@@ -611,6 +680,78 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     live: widget.live,
     targetCount: widget.recordTargets?.length ?? 0,
   );
+
+  /// The record action of the channel being watched, or
+  /// null when this viewing carries none: recordings,
+  /// and live channels whose zap target has none (see
+  /// [PlayerZapTarget.record]). Read from the zap index
+  /// as it stands, so the action follows a channel
+  /// switch to the new channel's programme.
+  Future<LiveRecordResult> Function()? get _currentRecordAction {
+    final targets = widget.zapTargets;
+    if (targets == null || _zapIndex < 0 || _zapIndex >= targets.length) {
+      return null;
+    }
+    return targets[_zapIndex].record;
+  }
+
+  /// The programme-state query of the channel being
+  /// watched (see [PlayerZapTarget.programmeState]),
+  /// read from the zap index as it stands, like the
+  /// record action beside it.
+  Future<LiveProgrammeReservationState> Function()? get _currentStateQuery {
+    final targets = widget.zapTargets;
+    if (targets == null || _zapIndex < 0 || _zapIndex >= targets.length) {
+      return null;
+    }
+    return targets[_zapIndex].programmeState;
+  }
+
+  /// The stop action of the channel being watched (see
+  /// [PlayerZapTarget.stopProgramme]), read from the zap
+  /// index as it stands, like the record action.
+  Future<LiveRecordStopResult> Function()? get _currentStopAction {
+    final targets = widget.zapTargets;
+    if (targets == null || _zapIndex < 0 || _zapIndex >= targets.length) {
+      return null;
+    }
+    return targets[_zapIndex].stopProgramme;
+  }
+
+  /// Whether this viewing offers the record action at
+  /// all (its presence in the controls and the channel
+  /// list menu): live viewing on a channel that carries
+  /// one. Presence does not follow the in-flight flags,
+  /// so the controls' layout stays put across a switch;
+  /// [_canRecord] decides whether a press runs.
+  bool get _recordOffered => widget.live && _currentRecordAction != null;
+
+  /// Whether a record press runs now (see
+  /// player_record_policy): the offered action, with no
+  /// record, channel switch or open in flight.
+  bool get _canRecord => canRecordCurrentProgramme(
+    live: widget.live,
+    hasRecordAction: _currentRecordAction != null,
+    busy: _recordBusy || _zapping || _opening,
+  );
+
+  /// Whether a stop press runs now (see
+  /// player_record_policy): the offered action, a state
+  /// with something to stop, and nothing in flight.
+  bool get _canStop => canStopCurrentProgramme(
+    live: widget.live,
+    hasStopAction: _currentStopAction != null,
+    state: _programmeState,
+    busy: _recordBusy || _zapping || _opening,
+  );
+
+  /// Whether the record controls' press runs now: the
+  /// record gate while the programme has no reservation,
+  /// the stop gate while it has one.
+  bool get _canActOnProgramme =>
+      _programmeState == LiveProgrammeReservationState.none
+      ? _canRecord
+      : _canStop;
 
   /// The heading while no zap header is shown: the
   /// record target the viewer stands on, so the title
@@ -841,6 +982,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     _observeSeekable();
     _open();
     _loadChapters();
+    // The watched programme's reservation state decides
+    // what the record controls offer (user-fork addition,
+    // 2026-11-26): ask for it as the screen opens. A
+    // viewing without a state query — recordings — simply
+    // keeps the empty state.
+    unawaited(_refreshProgrammeState());
   }
 
   void _onStartTimeout() {
@@ -1052,6 +1199,143 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     }
   }
 
+  /// Records the programme now on air on the channel
+  /// being watched (user-fork addition, 2026-11-26):
+  /// runs the current channel's record action — the live
+  /// side's reservation creation — and reports what it
+  /// came to as a snackbar, the way the reservation
+  /// screens report a create. The action is read from
+  /// the zap index as it stands, so after a channel
+  /// switch it records the new channel's programme. A
+  /// press while a record, a switch or an open is in
+  /// flight does nothing (see player_record_policy).
+  Future<void> _recordCurrentProgramme() async {
+    final record = _currentRecordAction;
+    if (!_canRecord || record == null) return;
+    _diag(
+      DiagCategory.playback,
+      'player: recording the programme on '
+      '${widget.zapTargets![_zapIndex].name}',
+    );
+    setState(() => _recordBusy = true);
+    LiveRecordResult result;
+    try {
+      result = await record();
+    } catch (e) {
+      _diag(DiagCategory.playback, 'player: record action failed: $e');
+      result = LiveRecordResult.failed;
+    }
+    if (!mounted) return;
+    setState(() => _recordBusy = false);
+    _diag(
+      DiagCategory.playback,
+      'player: record on ${widget.zapTargets![_zapIndex].name} '
+      'came to ${result.name}',
+    );
+    showSnack(context, liveRecordResultMessage(result));
+    // The reservation the press just made (or found)
+    // changes what the controls offer: ask again.
+    unawaited(_refreshProgrammeState());
+  }
+
+  /// The record controls' one press (user-fork addition,
+  /// 2026-11-26): records the programme while it has no
+  /// reservation, and stops it — recording or reservation
+  /// — while it has one, following the state the last
+  /// query reported (see _programmeState).
+  Future<void> _programmeAction() async {
+    switch (_programmeState) {
+      case LiveProgrammeReservationState.none:
+        await _recordCurrentProgramme();
+      case LiveProgrammeReservationState.reserved:
+      case LiveProgrammeReservationState.recording:
+        await _confirmAndStopProgramme();
+    }
+  }
+
+  /// Stops the programme being watched (user-fork
+  /// addition, 2026-11-26): a recording in progress, or
+  /// a reservation not yet started. The confirmation is
+  /// the reservation list's delete flow — the shared
+  /// confirmDialog, an action for a title and a
+  /// 〜しますか？ question — with the wording split by
+  /// what is being stopped, and the stop itself is the
+  /// current channel's stop action (the live side's
+  /// delete of the programme's reservation). The result
+  /// is reported as a snackbar, like the create beside
+  /// it, and the state is asked again afterwards.
+  Future<void> _confirmAndStopProgramme() async {
+    final stop = _currentStopAction;
+    if (!_canStop || stop == null) return;
+    final recording =
+        _programmeState == LiveProgrammeReservationState.recording;
+    final ok = await confirmDialog(
+      context,
+      title: recording ? '録画を停止' : '予約を取り消し',
+      message: recording ? 'この番組の録画を停止しますか？' : 'この番組の予約を取り消しますか？',
+      confirmLabel: recording ? '録画停止' : '取り消し',
+    );
+    if (!ok || !mounted) return;
+    // The viewer may have zapped while the dialog stood:
+    // the stop belongs to the channel it was asked on.
+    if (_currentStopAction != stop) return;
+    _diag(
+      DiagCategory.playback,
+      'player: stopping the programme on '
+      '${widget.zapTargets![_zapIndex].name}',
+    );
+    setState(() => _recordBusy = true);
+    LiveRecordStopResult result;
+    try {
+      result = await stop();
+    } catch (e) {
+      _diag(DiagCategory.playback, 'player: stop action failed: $e');
+      result = LiveRecordStopResult.failed;
+    }
+    if (!mounted) return;
+    setState(() => _recordBusy = false);
+    _diag(
+      DiagCategory.playback,
+      'player: stop on ${widget.zapTargets![_zapIndex].name} '
+      'came to ${result.name}',
+    );
+    showSnack(context, liveRecordStopResultMessage(result));
+    unawaited(_refreshProgrammeState());
+  }
+
+  /// Asks the channel being watched for its programme's
+  /// reservation state and holds the answer in
+  /// [_programmeState] (user-fork addition, 2026-11-26).
+  /// Runs when the screen opens, when a channel switch
+  /// lands, and after each record / stop. A channel
+  /// carrying no query clears the state. An answer that
+  /// lands after a newer query started, or after the
+  /// viewer zapped to another channel, is dropped — the
+  /// same late-answer guard the recording switch keeps
+  /// for its chapters.
+  Future<void> _refreshProgrammeState() async {
+    final query = _currentStateQuery;
+    if (query == null) {
+      if (_programmeState != LiveProgrammeReservationState.none && mounted) {
+        setState(() => _programmeState = LiveProgrammeReservationState.none);
+      }
+      return;
+    }
+    final ticket = ++_programmeStateTicket;
+    final index = _zapIndex;
+    LiveProgrammeReservationState result;
+    try {
+      result = await query();
+    } catch (e) {
+      _diag(DiagCategory.playback, 'player: programme state query failed: $e');
+      result = LiveProgrammeReservationState.none;
+    }
+    if (!mounted || ticket != _programmeStateTicket || index != _zapIndex) {
+      return;
+    }
+    setState(() => _programmeState = result);
+  }
+
   /// Shows the band's channels as a menu at [position]
   /// and zaps to the picked one. The channel being
   /// watched carries the check, the same mark the speed
@@ -1062,11 +1346,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// (see _onZapKeyEvent). Like the keys, the list stays
   /// available on the start error, so a channel whose
   /// start failed can be left this way too.
+  ///
+  /// Ahead of the channels sits the programme item,
+  /// while the viewing offers the programme actions: it
+  /// works on the programme now on air on the channel
+  /// being watched — recording it while it has no
+  /// reservation, stopping it while it has one (see
+  /// _programmeAction) — under the label the state calls
+  /// for. It rides the menu's own availability, so it is
+  /// there on the start error as well — the reservation
+  /// is about the broadcast programme, which is on air
+  /// whether or not this screen's stream started.
   Future<void> _showZapChannelList(Offset position) async {
     if (!_canZap || _zapping || _opening) return;
     if (!(ModalRoute.of(context)?.isCurrent ?? false)) return;
     final targets = widget.zapTargets!;
     final overlay = Overlay.of(context).context.findRenderObject()!;
+    // The menu value of the programme item: the channels
+    // answer with their index (zero and up), so a
+    // negative value can never be one of them.
+    const programmeActionValue = -1;
     final selected = await showMenu<int>(
       context: context,
       position: RelativeRect.fromRect(
@@ -1074,6 +1373,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         Offset.zero & (overlay as RenderBox).size,
       ),
       items: [
+        if (_recordOffered) ...[
+          PopupMenuItem<int>(
+            value: programmeActionValue,
+            enabled: !_recordBusy,
+            child: Row(
+              children: [
+                Icon(liveProgrammeActionIcon(_programmeState), size: 18),
+                const SizedBox(width: 8),
+                Text(liveProgrammeActionLabel(_programmeState)),
+              ],
+            ),
+          ),
+          const PopupMenuDivider(),
+        ],
         for (var i = 0; i < targets.length; i++)
           CheckedPopupMenuItem<int>(
             value: i,
@@ -1086,7 +1399,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           ),
       ],
     );
-    if (selected != null && mounted) _zapTo(selected);
+    if (selected == null || !mounted) return;
+    if (selected == programmeActionValue) {
+      unawaited(_programmeAction());
+    } else {
+      _zapTo(selected);
+    }
   }
 
   /// Switches playback to the zap target at [index], in
@@ -1171,6 +1489,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         _watchdog?.cancel();
       }
     });
+    // The new channel's programme carries its own
+    // reservation state: ask for it, so the record
+    // controls follow the switch.
+    unawaited(_refreshProgrammeState());
   }
 
   /// Switches playback to the recording at [index], in
@@ -1695,7 +2017,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         );
       }
       final start =
-          (!widget.live && _initialStart != null && _initialStart! > Duration.zero)
+          (!widget.live &&
+              _initialStart != null &&
+              _initialStart! > Duration.zero)
           ? _initialStart
           : null;
       if (start != null) {
@@ -1780,8 +2104,32 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         ),
       );
     }
+    if (widget.live) {
+      data = data.copyWith(bottomButtonBar: _liveMaterialBottomButtonBar());
+    }
     return data;
   }
+
+  /// The Material bottom row for live viewing: the stock
+  /// row — position indicator, spacer, fullscreen — with
+  /// the programme button ahead of the fullscreen
+  /// button, while the viewing offers the programme
+  /// actions (user-fork addition, 2026-11-26; see
+  /// player_record_policy). The button follows the
+  /// programme's reservation state — record, stop,
+  /// cancel — and disables while a record, stop, channel
+  /// switch or open is in flight, so the row's layout
+  /// never changes under the viewer's hand.
+  List<Widget> _liveMaterialBottomButtonBar() => [
+    const MaterialPositionIndicator(),
+    const Spacer(),
+    if (_recordOffered)
+      _ProgrammeActionButton(
+        state: _programmeState,
+        onAction: _canActOnProgramme ? _programmeAction : null,
+      ),
+    const MaterialFullscreenButton(),
+  ];
 
   /// The desktop controls theme with the same seek bar
   /// dimensions (player UI follow-up); the desktop defaults
@@ -1797,8 +2145,31 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (!widget.live) {
       data = data.copyWith(bottomButtonBar: _recordedDesktopButtonBar());
     }
+    if (widget.live) {
+      data = data.copyWith(bottomButtonBar: _liveDesktopButtonBar());
+    }
     return data;
   }
+
+  /// The desktop bottom row for live viewing: the stock
+  /// row with the programme button after the position
+  /// indicator, where the recorded row puts its own
+  /// additions (user-fork addition, 2026-11-26).
+  List<Widget> _liveDesktopButtonBar() => [
+    const MaterialDesktopSkipPreviousButton(),
+    const MaterialDesktopPlayOrPauseButton(),
+    const MaterialDesktopSkipNextButton(),
+    const MaterialDesktopVolumeButton(),
+    const MaterialDesktopPositionIndicator(),
+    if (_recordOffered)
+      _ProgrammeActionButton(
+        state: _programmeState,
+        onAction: _canActOnProgramme ? _programmeAction : null,
+        iconSize: 28,
+      ),
+    const Spacer(),
+    const MaterialDesktopFullscreenButton(),
+  ];
 
   /// The Material transport row for recordings: media_kit's
   /// stock row with a ±10 s skip button flanking the
@@ -1926,6 +2297,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       onSeek: _seekToPosition,
       onToggleFullscreen: () => state.toggleFullscreen(),
       isFullscreen: () => state.isFullscreen(),
+      onProgrammeAction: _recordOffered ? _programmeAction : null,
+      programmeState: _programmeState,
     );
   }
 
@@ -2131,8 +2504,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     // padding: it reports the raw inset whether or not
     // an ancestor has consumed the padding form.
     final bottomViewPadding = MediaQuery.viewPaddingOf(context).bottom;
-    final showListPanel =
-        _listPanelVisible && (_canZap || _canSwitchRecords);
+    final showListPanel = _listPanelVisible && (_canZap || _canSwitchRecords);
     return Scaffold(
       appBar: AppBar(
         title: _canZap ? _buildZapTitle(context) : Text(_displayTitle),
@@ -2444,6 +2816,49 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The programme button in the live controls' button
+/// bars (user-fork addition, 2026-11-26): one button
+/// whose face follows the watched programme's
+/// reservation state — the record dot while the
+/// programme has no reservation, a stop mark while it
+/// is recording, a cancel mark while its reservation is
+/// still ahead (see player_record_policy for the labels
+/// and icons, shared with the TV controls). Like the
+/// neighbouring custom buttons it is white while enabled
+/// and dims disabled — the player hands it a null
+/// callback while a record, stop, channel switch or
+/// open is in flight.
+class _ProgrammeActionButton extends StatelessWidget {
+  const _ProgrammeActionButton({
+    required this.state,
+    required this.onAction,
+    this.iconSize = 24,
+  });
+
+  /// The state the button's face follows.
+  final LiveProgrammeReservationState state;
+
+  /// Invoked when the button is tapped; null disables
+  /// the button.
+  final VoidCallback? onAction;
+
+  /// Icon size: 24 in the Material bottom row, matching
+  /// its stock buttons; the desktop row passes its own
+  /// 28.
+  final double iconSize;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: liveProgrammeActionLabel(state),
+      iconSize: iconSize,
+      color: Colors.white,
+      onPressed: onAction,
+      icon: Icon(liveProgrammeActionIcon(state)),
     );
   }
 }

@@ -122,7 +122,7 @@ void main() {
     final original = EpgGuide(broadcastingType: 3, services: [
       EpgServiceGuide(channel: channels.first, events: const []),
     ]);
-    final completed = completeBsEpgGuide(original, channels);
+    final completed = completeSatelliteEpgGuide(original, channels);
     expect(completed.services.map((s) => s.channel.serviceId),
         [191, 192, 193, 244]);
     expect(completed.eventCount, 0);
@@ -132,7 +132,7 @@ void main() {
 
   test('terrestrial guide is unchanged by the BS coverage helper', () {
     final original = EpgGuide(broadcastingType: 2, services: const []);
-    expect(identical(completeBsEpgGuide(original, [bs(193)]), original), isTrue);
+    expect(identical(completeSatelliteEpgGuide(original, [bs(193)]), original), isTrue);
   });
 
   test('BS scanner ignores bogus triples and non-video channels', () {

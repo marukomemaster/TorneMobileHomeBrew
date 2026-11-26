@@ -3,20 +3,22 @@
 dev prerelease (タグ `dev`) には、CI が自動ビルドするモバイル版
 (APK / IPA) に加えて、デスクトップ版も含める。
 
-デスクトップ版は CI では作らない。dev ビルドのたびに担当がこの手順で
-作り、資産を差し替える。資産名は固定で、差し替えで更新する
+デスクトップ版のうち Windows は CI (`.github/workflows/dev-build.yml`
+の windows ジョブ) が自動ビルドして資産を差し替える。Linux / macOS は
+CI では作らない。dev ビルドのたびに担当がこの手順で作り、資産を
+差し替える。資産名は固定で、差し替えで更新する
 (ダウンロード URL は変わらない)。
 
 | プラットフォーム | 資産名 | ビルド機 |
 |---|---|---|
 | Linux | `TorneMobileHomeBrew-dev-linux.tar.gz` | marnux |
-| Windows | `TorneMobileHomeBrew-dev-windows.zip` | marog |
+| Windows | `TorneMobileHomeBrew-dev-windows.zip` | GitHub Actions (windows-latest) |
 | macOS | `TorneMobileHomeBrew-dev-macos.zip` | Mac (署名後に任意で掲載) |
 
 CI (`.github/workflows/dev-build.yml`) の prerelease 資産整理は、
 上記のデスクトップ資産を保持リストに入れてあり、モバイル版の更新で
-消えることはない。逆に、デスクトップ資産はこの手順で差し替えない限り
-古いまま残るので、dev ビルドのたびに作り直すこと。
+消えることはない。逆に、Linux / macOS の資産はこの手順で差し替えない
+限り古いまま残るので、dev ビルドのたびに作り直すこと。
 
 版数は pubspec.yaml のまま据え置く (版数を上げるのは実機確認が
 通った正式リリース時だけ、という運用は dev でも同じ)。
@@ -36,7 +38,14 @@ gh release upload dev /tmp/TorneMobileHomeBrew-dev-linux.tar.gz \
 
 `~/ダウンロード/TMHB/` は正式リリース専用なので dev は置かない。
 
-## Windows (marog)
+## Windows (GitHub Actions)
+
+dev ビルドでは CI の windows ジョブが自動でビルドし、
+`TorneMobileHomeBrew-dev-windows.zip` を prerelease に掲載する。
+CI のパッケージングは、以下の手作業手順と同じ構成
+(Release の中身を `TorneMobileHomeBrew-dev-windows` フォルダに
+入れた zip) に揃えてある。手元で作る必要がある場合は marog で
+この手順を使う。
 
 ```powershell
 cd $env:USERPROFILE\GitTmp\MyClaude\TorneMobileHomeBrew
