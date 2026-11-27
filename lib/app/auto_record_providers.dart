@@ -15,10 +15,12 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/core.dart';
+import '../ui/auto_pick_policy.dart';
 import '../ui/auto_record_policy.dart';
 import '../ui/epg_genre.dart';
 import '../ui/epg_search.dart';
 import '../ui/format.dart';
+import 'auto_pick_providers.dart';
 import 'bs_epg_providers.dart';
 import 'cs_epg_providers.dart';
 import 'providers.dart';
@@ -100,7 +102,7 @@ final autoRecordRulesProvider =
     );
 
 /// What one logged check outcome was about.
-enum AutoRecordLogKind { reserved, conflict, error, ruleDisabled }
+enum AutoRecordLogKind { reserved, conflict, error, ruleDisabled, auto }
 
 /// One line of the check log: what a check did (or
 /// failed to do) about one programme on one unit.
@@ -206,13 +208,20 @@ class AutoRecordRunSummary {
     this.reserved = 0,
     this.conflicts = 0,
     this.errors = 0,
+    this.auto = 0,
   });
 
   final int reserved;
   final int conflicts;
   final int errors;
 
-  bool get didAnything => reserved > 0 || conflicts > 0 || errors > 0;
+  /// Reservations the auto pick made (kept apart
+  /// from [reserved]: the viewer asked for the
+  /// rules' reservations, not for these).
+  final int auto;
+
+  bool get didAnything =>
+      reserved > 0 || conflicts > 0 || errors > 0 || auto > 0;
 }
 
 /// A minute-of-day as `H:MM`, for the rule text's
@@ -283,13 +292,23 @@ class AutoRecordChecker {
     final rules = await _ref
         .read(autoRecordRulesProvider.notifier)
         .rulesWhenLoaded();
-    if (!rules.any((r) => r.enabled && r.isConfigured)) {
+    // The auto pick's settings land asynchronously
+    // too, and it runs with no rules at all (that is
+    // its point), so the gate is the two together: a
+    // check has work when a configured rule is on or
+    // the auto pick is.
+    final settings = await _ref
+        .read(autoPickSettingsProvider.notifier)
+        .settingsWhenLoaded();
+    if (!settings.enabled && !rules.any((r) => r.enabled && r.isConfigured)) {
       return const AutoRecordRunSummary();
     }
+    await _ref.read(autoPickMarksProvider.notifier).marksWhenLoaded();
     _running = true;
     var reserved = 0;
     var conflicts = 0;
     var errors = 0;
+    var auto = 0;
     final logEntries = <AutoRecordLogEntry>[];
     // The units are checked one at a time, in
     // registration order (owner request 2026-11-27):
@@ -310,12 +329,14 @@ class AutoRecordChecker {
         final outcome = await _runForUnit(
           reg,
           workingRules,
+          settings,
           logEntries,
           crossUnitKeys,
         );
         reserved += outcome.reserved;
         conflicts += outcome.conflicts;
         errors += outcome.errors;
+        auto += outcome.auto;
         crossUnitKeys.addAll(outcome.reservedKeys);
         if (outcome.spentOnceRuleIds.isNotEmpty) {
           final notifier = _ref.read(autoRecordRulesProvider.notifier);
@@ -339,6 +360,7 @@ class AutoRecordChecker {
       reserved: reserved,
       conflicts: conflicts,
       errors: errors,
+      auto: auto,
     );
   }
 
@@ -353,6 +375,7 @@ class AutoRecordChecker {
       int reserved,
       int conflicts,
       int errors,
+      int auto,
       Set<String> reservedKeys,
       List<String> spentOnceRuleIds,
     })
@@ -360,12 +383,14 @@ class AutoRecordChecker {
   _runForUnit(
     RegisteredNasne reg,
     List<AutoRecordRule> rules,
+    AutoPickSettings settings,
     List<AutoRecordLogEntry> logEntries,
     Set<String> externalReservedKeys,
   ) async {
     var reserved = 0;
     var conflicts = 0;
     var errors = 0;
+    var auto = 0;
     final spentOnceRuleIds = <String>[];
     final now = DateTime.now();
 
@@ -379,6 +404,20 @@ class AutoRecordChecker {
           channelName: hit?.channelName ?? '',
           start: hit?.event.start ?? now,
           ruleText: rule == null ? '' : autoRecordRuleText(rule),
+        ),
+      );
+    }
+
+    void logAuto(AutoRecordLogKind kind, EpgSearchHit? hit, int? score) {
+      logEntries.add(
+        AutoRecordLogEntry(
+          at: now,
+          regName: reg.friendlyName,
+          kind: kind,
+          title: hit?.event.title ?? '',
+          channelName: hit?.channelName ?? '',
+          start: hit?.event.start ?? now,
+          ruleText: score == null ? '自動録画' : '自動録画（スコア $score）',
         ),
       );
     }
@@ -406,6 +445,7 @@ class AutoRecordChecker {
         reserved: 0,
         conflicts: 0,
         errors: 0,
+        auto: 0,
         reservedKeys: <String>{},
         spentOnceRuleIds: const <String>[],
       );
@@ -420,6 +460,7 @@ class AutoRecordChecker {
         reserved: 0,
         conflicts: 0,
         errors: 1,
+        auto: 0,
         reservedKeys: <String>{},
         spentOnceRuleIds: const <String>[],
       );
@@ -451,6 +492,11 @@ class AutoRecordChecker {
 
     final services = _ref.read(deviceServicesProvider(reg));
     var createdAny = false;
+    // The rule pass's creations, kept as reservations:
+    // the auto pick plans against the list with these
+    // already in, so a rule's programme is its
+    // conflict, never the auto pick's second helping.
+    final createdSchedules = <RecordSchedule>[];
     for (final action in plan.reservations) {
       final hit = action.hit;
       final event = hit.event;
@@ -481,9 +527,24 @@ class AutoRecordChecker {
           log(AutoRecordLogKind.conflict, hit, rules[action.ruleIndex]);
           continue;
         }
-        await services.schedules.createSchedule(candidate);
+        final createdId = await services.schedules.createSchedule(candidate);
         createdAny = true;
         reserved++;
+        createdSchedules.add(
+          RecordSchedule(
+            id: createdId,
+            start: event.start,
+            durationSeconds: event.duration.inSeconds,
+            conditionId: candidate.conditionId,
+            channel: candidate.channel,
+            desiredQualityMode: candidate.desiredQualityMode,
+            desiredMatchingId: candidate.desiredMatchingId,
+            reservationCreatorId: candidate.reservationCreatorId,
+            priorityFlag: candidate.priorityFlag,
+            recordDestinationId: candidate.recordDestinationId,
+            title: event.title,
+          ),
+        );
         unitKeys.add(
           autoRecordProgrammeKey(
             broadcastingType: channel.broadcastingType,
@@ -504,14 +565,153 @@ class AutoRecordChecker {
         log(AutoRecordLogKind.error, hit, rules[action.ruleIndex]);
       }
     }
+    // The auto pick (owner request 2026-11-27): after
+    // the rules have taken what they claim, fill the
+    // time left free with the programmes the viewer's
+    // own history scores highest — when the viewer
+    // has switched it on. It creates at the model's
+    // default quality (DR): the quality choice is a
+    // rule's, not the auto pick's.
+    if (settings.enabled) {
+      final outcome = await _runAutoPick(
+        reg: reg,
+        services: services,
+        hits: hits,
+        effectiveExisting: [...existing, ...createdSchedules],
+        externalReservedKeys: externalReservedKeys,
+        settings: settings,
+        now: now,
+        logAuto: logAuto,
+      );
+      auto += outcome.auto;
+      errors += outcome.errors;
+      unitKeys.addAll(outcome.reservedKeys);
+      if (outcome.auto > 0) createdAny = true;
+    }
     if (createdAny) _ref.invalidate(schedulesProvider(reg));
     return (
       reserved: reserved,
       conflicts: conflicts,
       errors: errors,
+      auto: auto,
       reservedKeys: unitKeys,
       spentOnceRuleIds: spentOnceRuleIds,
     );
+  }
+
+  /// The auto pick for one unit: build the tendency
+  /// profile from the unit's own library, read its
+  /// free space, plan (see [planAutoPick]) and create
+  /// the picks, marking each one as the auto pick's
+  /// (see AutoPickMarksNotifier) and logging it under
+  /// its own kind. A candidate the unit reports a
+  /// conflict for at create time — something changed
+  /// between the plan and the create — is left alone
+  /// silently: the candidate list (ranking screen)
+  /// shows it as taken, and logging every routine
+  /// overlap would flood the log the rules' outcomes
+  /// live in.
+  Future<({int auto, int errors, Set<String> reservedKeys})> _runAutoPick({
+    required RegisteredNasne reg,
+    required DeviceServices services,
+    required List<EpgSearchHit> hits,
+    required List<RecordSchedule> effectiveExisting,
+    required Set<String> externalReservedKeys,
+    required AutoPickSettings settings,
+    required DateTime now,
+    required void Function(AutoRecordLogKind, EpgSearchHit?, int?) logAuto,
+  }) async {
+    var auto = 0;
+    var errors = 0;
+    final reservedKeys = <String>{};
+
+    final List<RecordedTitle> titles;
+    try {
+      titles = await services.titles.listTitles();
+    } catch (_) {
+      // No library, no tendency: the pick has nothing
+      // honest to score by, so it sits this unit out.
+      return (auto: 0, errors: 0, reservedKeys: reservedKeys);
+    }
+    final profile = autoPickProfileFor(
+      titles: titles,
+      schedules: effectiveExisting,
+      guideHits: hits,
+    );
+    if (profile.sampleCount == 0) {
+      return (auto: 0, errors: 0, reservedKeys: reservedKeys);
+    }
+
+    // The disk guard's input: the free space summed
+    // over the unit's usable drives (mounted and
+    // registered — the ones the home screen shows a
+    // detail for). A failed read leaves it unknown,
+    // and unknown blocks every pick (see planAutoPick).
+    int? freeBytes;
+    try {
+      var sum = 0;
+      var readAny = false;
+      for (final entry in await services.deviceInfo.listHdds()) {
+        if (!entry.mounted || !entry.registered) continue;
+        final info = await services.deviceInfo.getHddInfo(entry.id);
+        sum += info.freeBytes;
+        readAny = true;
+      }
+      if (readAny) freeBytes = sum;
+    } catch (_) {
+      freeBytes = null;
+    }
+
+    final marks = _ref.read(autoPickMarksProvider.notifier);
+    final plan = planAutoPick(
+      hits: hits,
+      profile: profile,
+      existing: effectiveExisting,
+      now: now,
+      maxPicks: settings.maxPerCheck,
+      freeBytes: freeBytes,
+      minFreeBytes: settings.minFreeBytes,
+      externalReservedKeys: externalReservedKeys,
+      autoReservedKeys: marks.keysFor(reg.host),
+    );
+    final createdKeys = <String>[];
+    for (final candidate in plan.picks) {
+      final hit = candidate.hit;
+      final event = hit.event;
+      final channel = hit.channel;
+      final create = NewRecordSchedule(
+        start: event.start,
+        durationSeconds: event.duration.inSeconds,
+        channel: ScheduleChannel(
+          broadcastingType: channel.broadcastingType,
+          channelType: channel.broadcastingType,
+          serviceId: channel.serviceId,
+        ),
+        networkId: channel.networkId,
+        eventId: event.eventId,
+      );
+      try {
+        final deviceConflicts = await services.schedules.checkConflicts(create);
+        if (deviceConflicts.isNotEmpty) continue;
+        await services.schedules.createSchedule(create);
+        auto++;
+        final key = autoRecordProgrammeKey(
+          broadcastingType: channel.broadcastingType,
+          serviceId: channel.serviceId,
+          start: event.start,
+        );
+        reservedKeys.add(key);
+        createdKeys.add(key);
+        logAuto(AutoRecordLogKind.auto, hit, candidate.score.total);
+      } catch (_) {
+        errors++;
+        logAuto(AutoRecordLogKind.error, hit, candidate.score.total);
+      }
+    }
+    if (createdKeys.isNotEmpty) {
+      await marks.addKeys(reg.host, createdKeys);
+    }
+    return (auto: auto, errors: errors, reservedKeys: reservedKeys);
   }
 }
 

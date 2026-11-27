@@ -10,9 +10,11 @@ import 'package:material_ui/material_ui.dart';
 import '../app/bs_epg_providers.dart';
 import '../app/cs_epg_providers.dart';
 import '../app/providers.dart';
+import '../app/auto_pick_providers.dart';
 import '../app/state.dart';
 import '../core/core.dart';
 import 'error_messages.dart';
+import 'auto_record_policy.dart';
 import 'format.dart';
 import 'schedule_form.dart';
 import 'tv_focus.dart';
@@ -80,6 +82,26 @@ class _SchedulesScreenState extends ConsumerState<SchedulesScreen> {
   }
 }
 
+/// Whether [schedule] is one the auto pick made:
+/// its programme key is in the mark store for [reg]
+/// (see AutoPickMarksNotifier). Display only — a
+/// marked reservation is the viewer's to keep or
+/// delete like any other.
+bool isAutoPickedSchedule(
+  WidgetRef ref,
+  RegisteredNasne reg,
+  RecordSchedule schedule,
+) {
+  final marks = ref.watch(autoPickMarksProvider);
+  return (marks[reg.host] ?? const <String>{}).contains(
+    autoRecordProgrammeKey(
+      broadcastingType: schedule.channel.broadcastingType,
+      serviceId: schedule.channel.serviceId,
+      start: schedule.start,
+    ),
+  );
+}
+
 class _ScheduleList extends ConsumerWidget {
   const _ScheduleList({
     required this.reg,
@@ -142,7 +164,8 @@ class _ScheduleList extends ConsumerWidget {
                   '${formatTimeJst(s.start)}〜${formatTimeJst(s.end)}'
                   ' (${formatDurationSeconds(s.durationSeconds)})'
                   ' 画質 ${qualityModeLabel(s.desiredQualityMode)}'
-                  '${s.title != null ? ' ${s.title}' : ''}',
+                  '${s.title != null ? ' ${s.title}' : ''}'
+                  '${isAutoPickedSchedule(ref, reg, s) ? ' ・ 自動' : ''}',
                 ),
                 trailing: s.priorityFlag != 0
                     ? const Icon(Icons.priority_high, size: 18)
@@ -259,6 +282,8 @@ class ScheduleDetailView extends ConsumerWidget {
         FieldRow(label: '画質モード', value: qualityModeLabel(s.desiredQualityMode)),
         FieldRow(label: '優先フラグ', value: '${s.priorityFlag}'),
         FieldRow(label: '条件 ID', value: s.conditionId),
+        if (isAutoPickedSchedule(ref, reg, s))
+          const FieldRow(label: '自動録画', value: 'おまかせ自動録画で予約しました'),
         // recordDestinationId is deliberately not shown (plan 28):
         // on a reservation it is the creator's desired/template
         // value, not the physical destination — torne's 3倍

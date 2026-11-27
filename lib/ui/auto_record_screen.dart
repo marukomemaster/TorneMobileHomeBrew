@@ -9,6 +9,7 @@ library;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../app/auto_pick_providers.dart';
 import '../app/auto_record_providers.dart';
 import '../app/bs_epg_providers.dart';
 import '../app/cs_epg_providers.dart';
@@ -17,6 +18,7 @@ import '../core/core.dart';
 import 'auto_record_policy.dart';
 import 'epg_genre.dart';
 import 'format.dart';
+import 'ranking_screen.dart';
 import 'widgets.dart';
 
 class AutoRecordScreen extends ConsumerStatefulWidget {
@@ -40,6 +42,7 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
           ? 'チェック完了：予約 ${summary.reserved} 件・'
                 '競合で見送り ${summary.conflicts} 件・'
                 'エラー ${summary.errors} 件'
+                '${summary.auto > 0 ? '・自動 ${summary.auto} 件' : ''}'
           : 'チェック完了：新しい予約はありませんでした',
     );
   }
@@ -57,6 +60,8 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
   Widget build(BuildContext context) {
     final rules = ref.watch(autoRecordRulesProvider);
     final log = ref.watch(autoRecordLogProvider);
+    final autoSettings = ref.watch(autoPickSettingsProvider);
+    final autoSettingsNotifier = ref.read(autoPickSettingsProvider.notifier);
     return Scaffold(
       appBar: AppBar(
         title: const Text('おまかせ録画'),
@@ -133,6 +138,60 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Text(
+              'おまかせ自動録画',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+          ),
+          SwitchListTile(
+            title: const Text('自動録画を使う'),
+            subtitle: const Text(
+              'ルールに無い番組も、よく録るジャンルやチャンネルの傾向から、'
+              '空いている時間に自動で録画します。ルールと手動の予約が常に優先で、'
+              '自動で録った番組は勝手に消しません。',
+            ),
+            value: autoSettings.enabled,
+            onChanged: autoSettingsNotifier.setEnabled,
+          ),
+          ListTile(
+            title: const Text('空き容量の下限'),
+            subtitle: const Text('空きがこれを下回ったら自動録画しません'),
+            trailing: DropdownButton<int>(
+              value: autoSettings.minFreeGb,
+              items: [
+                for (final gb in const [5, 10, 20, 50, 100])
+                  DropdownMenuItem<int>(value: gb, child: Text('$gb GB')),
+              ],
+              onChanged: (value) {
+                if (value != null) autoSettingsNotifier.setMinFreeGb(value);
+              },
+            ),
+          ),
+          ListTile(
+            title: const Text('1回のチェックで録る上限'),
+            trailing: DropdownButton<int>(
+              value: autoSettings.maxPerCheck,
+              items: [
+                for (final count in const [1, 2, 3, 5, 10])
+                  DropdownMenuItem<int>(value: count, child: Text('$count 件')),
+              ],
+              onChanged: (value) {
+                if (value != null) autoSettingsNotifier.setMaxPerCheck(value);
+              },
+            ),
+          ),
+          ListTile(
+            title: const Text('ランキングを見る'),
+            subtitle: const Text('よく録る傾向 ・ おすすめ番組 ・ 自動録画の候補'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute<void>(builder: (_) => const RankingScreen()),
+            ),
+          ),
+          const Divider(height: 32),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(
               'チェック履歴',
               style: Theme.of(context).textTheme.titleMedium,
             ),
@@ -151,6 +210,7 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
                   AutoRecordLogKind.error => Icons.error_outline,
                   AutoRecordLogKind.ruleDisabled =>
                     Icons.do_not_disturb_on_outlined,
+                  AutoRecordLogKind.auto => Icons.auto_awesome,
                 }),
                 title: Text(
                   entry.title.isEmpty ? '（タイトルなし）' : entry.title,
@@ -163,6 +223,7 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
                     AutoRecordLogKind.conflict => '競合で見送り',
                     AutoRecordLogKind.error => 'エラー',
                     AutoRecordLogKind.ruleDisabled => '1回だけのためルールを無効化',
+                    AutoRecordLogKind.auto => '自動で予約しました',
                   }}'
                   ' ・ ${entry.channelName}'
                   ' ・ ${formatDateTimeWithWeekdayJst(entry.start)}'
@@ -238,19 +299,21 @@ class _AutoRecordRuleEditScreenState
         if (guide == null) continue;
         for (final service in guide.services) {
           final ch = service.channel;
-          seen.putIfAbsent(
-            (ch.networkId, ch.transportStreamId, ch.serviceId),
-            () => ch,
-          );
+          seen.putIfAbsent((
+            ch.networkId,
+            ch.transportStreamId,
+            ch.serviceId,
+          ), () => ch);
         }
       }
     }
-    final channels = seen.values.toList()..sort((a, b) {
-      final byBand = a.broadcastingType.compareTo(b.broadcastingType);
-      if (byBand != 0) return byBand;
-      final byNumber = a.channelNumber.compareTo(b.channelNumber);
-      return byNumber != 0 ? byNumber : a.serviceId.compareTo(b.serviceId);
-    });
+    final channels = seen.values.toList()
+      ..sort((a, b) {
+        final byBand = a.broadcastingType.compareTo(b.broadcastingType);
+        if (byBand != 0) return byBand;
+        final byNumber = a.channelNumber.compareTo(b.channelNumber);
+        return byNumber != 0 ? byNumber : a.serviceId.compareTo(b.serviceId);
+      });
     return [
       for (final ch in channels)
         AutoRecordChannel(

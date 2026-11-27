@@ -10,6 +10,7 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../app/auto_pick_providers.dart';
 import '../app/auto_record_providers.dart';
 import '../app/debug_log.dart';
 import '../app/external_browser.dart';
@@ -21,6 +22,7 @@ import '../app/state.dart';
 import '../app/store_directory.dart';
 import '../core/core.dart';
 import 'auto_record_screen.dart';
+import 'ranking_screen.dart';
 import 'dtcp_credential_screen.dart';
 import 'epg_hidden_genres_screen.dart';
 import 'error_messages.dart';
@@ -59,6 +61,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final selected = ref.watch(selectedRegistrationProvider);
     final debugSettings = ref.watch(debugSettingsProvider);
     final autoRecordRules = ref.watch(autoRecordRulesProvider);
+    final autoPickSettings = ref.watch(autoPickSettingsProvider);
     final storeDir = ref.watch(storeDirectoryProvider);
     return Scaffold(
       appBar: AppBar(title: const Text('設定')),
@@ -391,9 +394,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             trailing: const Icon(Icons.chevron_right),
             onTap: () => Navigator.push(
               context,
-              MaterialPageRoute<void>(
-                builder: (_) => const AutoRecordScreen(),
-              ),
+              MaterialPageRoute<void>(builder: (_) => const AutoRecordScreen()),
+            ),
+          ),
+          SwitchListTile(
+            title: const Text('おまかせ自動録画'),
+            subtitle: const Text('ルールに無い番組も、よく録る傾向から空き時間に自動で録画します'),
+            value: autoPickSettings.enabled,
+            onChanged: (value) =>
+                ref.read(autoPickSettingsProvider.notifier).setEnabled(value),
+          ),
+          ListTile(
+            title: const Text('ランキング'),
+            subtitle: const Text('よく録る傾向 ・ おすすめ番組 ・ 自動録画の候補'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute<void>(builder: (_) => const RankingScreen()),
             ),
           ),
           const Divider(),
