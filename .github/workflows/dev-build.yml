@@ -5,7 +5,7 @@ name: dev-build
 # artifact に加えて、ローリングな prerelease (タグ dev) にも載せる。
 # 利用者は Actions 画面を開かずに Releases の「開発版 (dev)」から取得できる。
 # 資産名は TorneMobileHomeBrew-dev.apk / TorneMobileHomeBrew-dev.ipa /
-# TorneMobileHomeBrew-dev-windows.zip で固定し、
+# TorneMobileHomeBrew-dev-windows.zip / TorneMobileHomeBrew-dev-tv.apk で固定し、
 # リリースは作り直さず資産の差し替えで更新する (ダウンロード URL が変わらない)。
 # デスクトップは Windows のみ CI で作る。Linux / macOS は担当が
 # tool/dev_desktop_builds.md の手順でビルドして差し替える。
@@ -80,11 +80,17 @@ jobs:
           flutter pub get
           flutter build apk --release --flavor standard
 
+      - name: TV 版 APK ビルド
+        run: |
+          flutter build apk --release --flavor tv -t lib/main_tv.dart
+
       - name: 成果物の配置
         run: |
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-standard-release.apk \
             "dist/TorneMobileHomeBrew-dev.apk"
+          cp build/app/outputs/flutter-apk/app-tv-release.apk \
+            "dist/TorneMobileHomeBrew-dev-tv.apk"
 
       - name: artifact アップロード
         uses: actions/upload-artifact@v4
@@ -200,6 +206,7 @@ jobs:
             echo "- バージョン: ${VERSION}"
             echo "- 元 commit: ${SHORT_SHA}"
             echo "- Android: APK (署名は、配布用キーストアが登録されていれば配布用鍵、なければデバッグ鍵)"
+            echo "- Android TV / Fire TV: TorneMobileHomeBrew-dev-tv.apk (TV 版、minSdk 24、標準版と共存可能)"
             echo "- iOS: 署名なし IPA (LiveContainer 等での利用を想定)"
             echo "- Windows: デスクトップ版 zip (CI でビルド)"
             echo "- デスクトップ (Linux / macOS): CI では作らず、担当が tool/dev_desktop_builds.md の手順でビルドして差し替える (macOS は署名の都合で Mac 上のビルド + 本人署名が正規経路)"
