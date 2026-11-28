@@ -100,6 +100,7 @@ List<int> _ids(List<EpgSearchHit> hits) => [
 class _MenuFakeSchedules implements ScheduleService {
   final List<RecordSchedule> items = [];
   final List<NewRecordSchedule> created = [];
+  final List<String> deleted = [];
   List<RecordSchedule> conflicts = const [];
 
   @override
@@ -118,7 +119,9 @@ class _MenuFakeSchedules implements ScheduleService {
   Future<void> updateSchedule(ScheduleUpdate update) async {}
 
   @override
-  Future<void> deleteSchedule(String id) async {}
+  Future<void> deleteSchedule(String id) async {
+    deleted.add(id);
+  }
 
   @override
   Future<List<RecordSchedule>> checkConflicts(
@@ -556,8 +559,8 @@ void main() {
       expect(find.text('予約を作成しました'), findsOneWidget);
     });
 
-    testWidgets('a programme already reserved is reported, not '
-        'duplicated', (tester) async {
+    testWidgets('a programme already reserved offers 録画解除, not '
+        '録画, and deleting runs the one confirmation', (tester) async {
       final start = DateTime.now().add(const Duration(days: 1));
       final schedules = _MenuFakeSchedules()
         ..items.add(_listedReservation(start: start));
@@ -567,11 +570,27 @@ void main() {
 
       await tester.longPress(find.widgetWithText(ListTile, '明日のドラマ'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('録画'));
+
+      // The guide tile menu's stance (owner request
+      // 2026-11-28): a reserved programme is un-reserved
+      // from here, never reserved twice.
+      expect(find.text('録画解除'), findsOneWidget);
+      expect(find.text('録画'), findsNothing);
+
+      await tester.tap(find.text('録画解除'));
+      await tester.pumpAndSettle();
+
+      // The detail dialog's own confirmation stands between
+      // the menu and the device: nothing is deleted yet.
+      expect(find.text('予約を削除'), findsOneWidget);
+      expect(schedules.deleted, isEmpty);
+
+      await tester.tap(find.text('削除'));
       await tester.pumpAndSettle();
 
       expect(schedules.created, isEmpty);
-      expect(find.text('すでに予約されています'), findsOneWidget);
+      expect(schedules.deleted, ['100']);
+      expect(find.text('予約を削除しました'), findsOneWidget);
     });
 
     testWidgets('a conflicting programme is reported and not created', (

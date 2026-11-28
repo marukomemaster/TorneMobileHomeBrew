@@ -33,9 +33,27 @@
 ///
 /// The setting is offered on Android only (mobile and TV):
 /// the failure it answers is Android hardware's, and the
-/// desktop builds are out of this round's scope. The stored
-/// value defaults to auto, so a value restored on any other
-/// platform changes nothing there.
+/// desktop builds are out of this round's scope.
+///
+/// What an unset value means depends on the variant
+/// ([defaultVideoHwdecMode]): the standard variant reads it
+/// as auto, exactly as before this default existed. The TV
+/// variant reads it as [VideoHwdecMode.software] — full
+/// software decoding. Two measurements sit behind that
+/// choice, and they differ by unit: on plan 139's Fire TV
+/// 4K Max (first generation), switching MPEG-2 alone to
+/// software brought the picture up, so mpeg2Software was
+/// the TV default at first; but on the fork owner's own
+/// Fire OS 7 unit (measured on the real device,
+/// 2026-11-28) MPEG-2-only software stayed black — that
+/// unit's hardware path produces no picture for H.264
+/// either, which is what BS / CS broadcasts and the mobile
+/// transcode streams are, and only full software decoding
+/// brought the picture up. The TV edition exists for that
+/// hardware class, and a first-run viewer there should get
+/// a picture without having to find this setting first. A
+/// mode the viewer stored explicitly always wins over the
+/// default, on either variant.
 library;
 
 /// How the video decoding for a playback is split between
@@ -76,16 +94,30 @@ enum VideoHwdecMode {
 /// hardware-decoded.)
 const String mpeg2SoftwareHwdecCodecs = 'h264,hevc,mpeg4,vp8,vp9,av1';
 
+/// The mode in force when the viewer has stored nothing:
+/// [VideoHwdecMode.auto] on the standard variant,
+/// [VideoHwdecMode.software] on the TV variant (see the
+/// library comment for the two measurements behind the TV
+/// default — plan 139's unit needed only MPEG-2 in
+/// software, the fork owner's Fire OS 7 unit needs every
+/// codec there).
+VideoHwdecMode defaultVideoHwdecMode({required bool isTv}) =>
+    isTv ? VideoHwdecMode.software : VideoHwdecMode.auto;
+
 /// Parses the stored form of the setting (the mode's name,
 /// as written by the settings notifier). Null, and any name
 /// this build does not know — a newer build's mode, or
-/// corruption — read as [VideoHwdecMode.auto], the verified
-/// default, never as an unreviewed decode path.
-VideoHwdecMode parseVideoHwdecMode(String? raw) {
+/// corruption — read as [fallback] (auto unless the caller
+/// passes the variant's default), never as an unreviewed
+/// decode path.
+VideoHwdecMode parseVideoHwdecMode(
+  String? raw, {
+  VideoHwdecMode fallback = VideoHwdecMode.auto,
+}) {
   for (final mode in VideoHwdecMode.values) {
     if (mode.name == raw) return mode;
   }
-  return VideoHwdecMode.auto;
+  return fallback;
 }
 
 /// The `hwdec-codecs` value to set for [mode] before open,

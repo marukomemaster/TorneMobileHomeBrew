@@ -11,19 +11,22 @@
 /// the shared event detail dialog ([showEpgEventDetail]).
 ///
 /// A right click (desktop) or a long press (touch) on an
-/// event tile opens that programme's menu — 録画 —
-/// reserving it without the trip through the detail
-/// dialog (owner request 2026-11-27). The menu is the
-/// search results' row menu's kin: an observing pointer
-/// listener over the tile, a right click answered at once
-/// and a touch hold timed from the same listener, and
-/// showMenu at the press point. The reservation runs the
-/// shared guide-event create (see recordGuideEvent) and
-/// reports its outcome with that path's wording. A
-/// programme that has already ended offers no menu at
-/// all: the detail dialog offers it no reservation
-/// either, and there is nothing else for the menu to
-/// carry.
+/// event tile opens that programme's menu — 番組情報を見る /
+/// 視聴する / 録画, with 録画解除 in place of 録画 for a
+/// programme that already has a reservation — the official
+/// app's shape (owner request 2026-11-27, extended
+/// 2026-11-28; see epg_menu_policy.dart for which items a
+/// programme gets). The menu is the search results' row
+/// menu's kin: an observing pointer listener over the tile,
+/// a right click answered at once and a touch hold timed
+/// from the same listener, and showMenu at the press point.
+/// The reservation runs the shared guide-event create (see
+/// recordGuideEvent) and reports its outcome with that
+/// path's wording; the un-reservation runs the detail
+/// dialog's delete flow (plan 124). A programme that has
+/// already ended offers no menu at all: the detail dialog
+/// offers it no reservation either, and there is nothing
+/// else for the menu to carry.
 library;
 
 import 'dart:async';
@@ -41,8 +44,11 @@ import '../app/cs_epg_providers.dart';
 import '../core/core.dart';
 import 'channel_visibility.dart';
 import 'epg_genre.dart';
+import 'epg_menu_policy.dart';
+import 'epg_onair_policy.dart';
 import 'epg_reserved.dart';
 import 'epg_search_screen.dart';
+import 'epg_zoom_policy.dart';
 import 'error_messages.dart';
 import 'format.dart';
 import 'live_screen.dart';
@@ -52,8 +58,11 @@ import 'epg_subchannel_visibility.dart';
 import 'tv_focus.dart';
 import 'widgets.dart';
 
-/// Vertical scale of the grid: pixels per broadcast minute.
-const double _pxPerMinute = 2.4;
+/// The grid's vertical scale — pixels per broadcast
+/// minute — is the viewer's zoom (epg_zoom_policy.dart)
+/// over the base density; it is threaded down from the
+/// screen, never a constant, so a pinch re-densifies the
+/// whole grid at once.
 const double _channelWidth = 172;
 const double _rulerWidth = 40;
 const double _headerHeight = 54;
@@ -181,10 +190,26 @@ class _EpgGridScrollBehavior extends MaterialScrollBehavior {
 /// the existing controller link, and plain clicks still land
 /// on the event tiles: the pan recogniser only claims a press
 /// once it moves past the slop.
+///
+/// A two-finger pinch zooms the grid's vertical density
+/// (owner request 2026-11-28, the official app's gesture):
+/// an observing [Listener] — never in the gesture arena, so
+/// it cannot disturb the pan or the tiles — watches the
+/// pointers over the grid; when a second pointer lands, the
+/// pinch takes over (any scroll drag in flight is cancelled)
+/// and the finger distance drives the zoom scale, reported
+/// through [onZoomChanged]. The scroll stays anchored on
+/// the broadcast minute under the fingers: the minute at
+/// the pinch's start focal point is re-placed under the
+/// focal point at the new density once the rebuild lands.
+/// One finger alone never zooms — the pan above owns it.
 class _GuideGridScroll extends StatefulWidget {
   const _GuideGridScroll({
     required this.gridController,
     required this.bodyController,
+    required this.zoomScale,
+    required this.onZoomChanged,
+    required this.onZoomEnded,
     required this.child,
   });
 
@@ -193,6 +218,17 @@ class _GuideGridScroll extends StatefulWidget {
 
   /// Vertical (time axis) scroll of the day grid.
   final ScrollController bodyController;
+
+  /// The grid's current zoom scale (epg_zoom_policy.dart).
+  final double zoomScale;
+
+  /// A pinch moved: the scale it asks for. The screen
+  /// holds the scale while the pinch runs and persists it
+  /// when the pinch ends ([onZoomEnded]).
+  final ValueChanged<double> onZoomChanged;
+
+  /// The pinch ended: the scale it settled on.
+  final ValueChanged<double> onZoomEnded;
 
   final Widget child;
 
@@ -205,6 +241,35 @@ class _GuideGridScrollState extends State<_GuideGridScroll> {
   Drag? _verticalDrag;
   ScrollHoldController? _horizontalHold;
   ScrollHoldController? _verticalHold;
+
+  /// The pointers currently down over the grid, by pointer
+  /// id, in this widget's local coordinates: the pinch
+  /// watch. Two entries make a pinch.
+  final Map<int, Offset> _pointers = {};
+
+  /// A pinch is running: the pan handlers stand down (the
+  /// drag they were driving was cancelled as it began).
+  bool _pinching = false;
+
+  /// The zoom scale when the running pinch began.
+  double _pinchStartScale = 1;
+
+  /// The distance between the two fingers when the running
+  /// pinch began; the scale grows with the distance's
+  /// ratio to this.
+  double _pinchStartDistance = 0;
+
+  /// The content offset (in start-scale pixels) of the
+  /// broadcast minute under the fingers when the pinch
+  /// began — the anchor the scroll is re-placed on as the
+  /// density changes.
+  double _pinchAnchorContentY = 0;
+
+  /// The vertical scroll offset the anchor asks for,
+  /// applied after the zoom's rebuild settles (the scroll
+  /// extents are the old density's until then).
+  double? _pendingBodyTarget;
+  bool _anchorJumpQueued = false;
 
   ScrollPosition? get _horizontalPosition =>
       widget.gridController.hasClients ? widget.gridController.position : null;
@@ -251,6 +316,9 @@ class _GuideGridScrollState extends State<_GuideGridScroll> {
   }
 
   void _handleDragUpdate(DragUpdateDetails details) {
+    // A pinch owns the pointers while it runs; its first
+    // finger's pan tail must not scroll underneath it.
+    if (_pinching) return;
     // ScrollDragController reads primaryDelta, so each axis
     // gets the pan delta projected onto it, as the framework's
     // two-dimensional scrollable does.
@@ -297,9 +365,99 @@ class _GuideGridScrollState extends State<_GuideGridScroll> {
     _verticalDrag?.cancel();
   }
 
+  // The pinch watch: an observing listener's handlers.
+  // They only ever read the pointers and drive the zoom;
+  // nothing here takes an event away from the pan or the
+  // tiles.
+
+  void _handlePointerDown(PointerDownEvent event) {
+    _pointers[event.pointer] = event.localPosition;
+    if (_pointers.length == 2) _beginPinch();
+  }
+
+  void _handlePointerMove(PointerMoveEvent event) {
+    if (!_pointers.containsKey(event.pointer)) return;
+    _pointers[event.pointer] = event.localPosition;
+    if (_pinching && _pointers.length == 2) _updatePinch();
+  }
+
+  void _handlePointerEnd(PointerEvent event) {
+    _pointers.remove(event.pointer);
+    if (_pinching && _pointers.length < 2) {
+      _pinching = false;
+      widget.onZoomEnded(widget.zoomScale);
+    }
+  }
+
+  /// The second finger landed: the pinch takes over from
+  /// whatever the first finger was doing (a scroll drag in
+  /// flight is cancelled, so its release cannot fling),
+  /// and the anchor is fixed — the broadcast minute under
+  /// the fingers, in the density of this moment.
+  void _beginPinch() {
+    final points = _pointers.values.toList();
+    _pinchStartDistance = (points[0] - points[1]).distance;
+    _pinchStartScale = widget.zoomScale;
+    final focal = (points[0] + points[1]) / 2;
+    // The day grid's viewport starts below the channel
+    // header, so the focal point's place inside it is its
+    // distance from there.
+    _pinchAnchorContentY =
+        (_verticalPosition?.pixels ?? 0) + (focal.dy - _headerHeight);
+    _pinching = true;
+    _handleDragCancel();
+  }
+
+  /// A finger moved mid-pinch: the finger distance's
+  /// growth over its starting distance is the zoom, and
+  /// the anchor minute is re-placed under the fingers at
+  /// the new density.
+  void _updatePinch() {
+    final points = _pointers.values.toList();
+    final distance = (points[0] - points[1]).distance;
+    if (_pinchStartDistance <= 0) return;
+    final scale = clampEpgZoomScale(
+      _pinchStartScale * distance / _pinchStartDistance,
+    );
+    if ((scale - widget.zoomScale).abs() > 0.001) {
+      widget.onZoomChanged(scale);
+    }
+    final focal = (points[0] + points[1]) / 2;
+    final ratio =
+        epgPxPerMinuteForScale(scale) /
+        epgPxPerMinuteForScale(_pinchStartScale);
+    _pendingBodyTarget =
+        _pinchAnchorContentY * ratio - (focal.dy - _headerHeight);
+    _queueAnchorJump();
+  }
+
+  /// Applies the anchor's scroll offset once the zoom's
+  /// rebuild has settled: until then the scroll position's
+  /// extents are still the old density's, and a jump would
+  /// clamp against them.
+  void _queueAnchorJump() {
+    if (_anchorJumpQueued) return;
+    _anchorJumpQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _anchorJumpQueued = false;
+      final target = _pendingBodyTarget;
+      _pendingBodyTarget = null;
+      final position = _verticalPosition;
+      if (target == null || position == null || !mounted) return;
+      position.jumpTo(
+        target.clamp(position.minScrollExtent, position.maxScrollExtent),
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    return RawGestureDetector(
+    return Listener(
+      onPointerDown: _handlePointerDown,
+      onPointerMove: _handlePointerMove,
+      onPointerUp: _handlePointerEnd,
+      onPointerCancel: _handlePointerEnd,
+      child: RawGestureDetector(
       gestures: <Type, GestureRecognizerFactory>{
         PanGestureRecognizer:
             GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
@@ -338,6 +496,7 @@ class _GuideGridScrollState extends State<_GuideGridScroll> {
           child: widget.child,
         ),
       ),
+      ),
     );
   }
 }
@@ -355,6 +514,14 @@ class _EpgScreenState extends ConsumerState<EpgScreen> {
   DateTime? _selectedDay;
   bool _scrolledToNow = false;
   int _selectedBand = terrestrialBroadcastingType;
+
+  /// The zoom scale while a pinch is running: the pinch
+  /// drives the grid's density live through this, and the
+  /// settled scale goes to the persisted setting
+  /// (epgZoomProvider) when the pinch ends — so the
+  /// key-value store sees one write per pinch, not one
+  /// per finger move.
+  double? _pinchZoomScale;
 
   final _rulerController = ScrollController();
   final _bodyController = ScrollController();
@@ -566,6 +733,13 @@ class _EpgScreenState extends ConsumerState<EpgScreen> {
               gridController: _gridController,
               scrolledToNow: _scrolledToNow,
               onScrolledToNow: () => _scrolledToNow = true,
+              zoomScale: _pinchZoomScale ?? ref.watch(epgZoomProvider),
+              onZoomChanged: (scale) =>
+                  setState(() => _pinchZoomScale = scale),
+              onZoomEnded: (scale) {
+                setState(() => _pinchZoomScale = null);
+                unawaited(ref.read(epgZoomProvider.notifier).set(scale));
+              },
             ),
           ),
         ),
@@ -591,6 +765,9 @@ class _GuideView extends StatelessWidget {
     required this.gridController,
     required this.scrolledToNow,
     required this.onScrolledToNow,
+    required this.zoomScale,
+    required this.onZoomChanged,
+    required this.onZoomEnded,
   });
 
   final RegisteredNasne reg;
@@ -624,8 +801,18 @@ class _GuideView extends StatelessWidget {
   final bool scrolledToNow;
   final VoidCallback onScrolledToNow;
 
+  /// The grid's zoom scale (epg_zoom_policy.dart): the
+  /// density every part of the grid below is laid out at.
+  final double zoomScale;
+
+  /// A pinch over the grid moved / ended (see
+  /// _GuideGridScroll).
+  final ValueChanged<double> onZoomChanged;
+  final ValueChanged<double> onZoomEnded;
+
   @override
   Widget build(BuildContext context) {
+    final pxPerMinute = epgPxPerMinuteForScale(zoomScale);
     final from = guide.from;
     final to = guide.to;
     if (from == null || to == null || guide.services.isEmpty) {
@@ -660,7 +847,7 @@ class _GuideView extends StatelessWidget {
           // raw target exceeds the maximum extent, and an out-of-range
           // rest position leaves the grid in a corrected state that
           // does not accept drags cleanly (plan 23).
-          final target = math.max(0, minutes * _pxPerMinute).toDouble();
+          final target = math.max(0, minutes * pxPerMinute).toDouble();
           bodyController.jumpTo(
             math.min(target, bodyController.position.maxScrollExtent),
           );
@@ -682,7 +869,12 @@ class _GuideView extends StatelessWidget {
                 child: Column(
                   children: [
                     const SizedBox(height: _headerHeight),
-                    Expanded(child: _TimeRuler(controller: rulerController)),
+                    Expanded(
+                      child: _TimeRuler(
+                        controller: rulerController,
+                        pxPerMinute: pxPerMinute,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -691,6 +883,9 @@ class _GuideView extends StatelessWidget {
                 child: _GuideGridScroll(
                   gridController: gridController,
                   bodyController: bodyController,
+                  zoomScale: zoomScale,
+                  onZoomChanged: onZoomChanged,
+                  onZoomEnded: onZoomEnded,
                   child: SizedBox(
                     width: _channelWidth * guide.services.length,
                     child: Column(
@@ -708,6 +903,7 @@ class _GuideView extends StatelessWidget {
                             dayStart: dayStart,
                             dayEnd: dayEnd,
                             controller: bodyController,
+                            pxPerMinute: pxPerMinute,
                           ),
                         ),
                       ],
@@ -809,9 +1005,13 @@ class _ChannelHeader extends StatelessWidget {
 }
 
 class _TimeRuler extends StatelessWidget {
-  const _TimeRuler({required this.controller});
+  const _TimeRuler({required this.controller, required this.pxPerMinute});
 
   final ScrollController controller;
+
+  /// The grid's density (pixels per broadcast minute) at
+  /// the current zoom.
+  final double pxPerMinute;
 
   @override
   Widget build(BuildContext context) {
@@ -820,12 +1020,12 @@ class _TimeRuler extends StatelessWidget {
       controller: controller,
       physics: const NeverScrollableScrollPhysics(),
       child: SizedBox(
-        height: 24 * 60 * _pxPerMinute,
+        height: 24 * 60 * pxPerMinute,
         child: Stack(
           children: [
             for (var hour = 0; hour < 24; hour++)
               Positioned(
-                top: hour * 60 * _pxPerMinute + 2,
+                top: hour * 60 * pxPerMinute + 2,
                 left: 0,
                 right: 0,
                 child: Text(
@@ -853,6 +1053,7 @@ class _DayGrid extends StatelessWidget {
     required this.dayStart,
     required this.dayEnd,
     required this.controller,
+    required this.pxPerMinute,
   });
 
   final RegisteredNasne reg;
@@ -873,14 +1074,18 @@ class _DayGrid extends StatelessWidget {
   final DateTime dayEnd;
   final ScrollController controller;
 
+  /// The grid's density (pixels per broadcast minute) at
+  /// the current zoom.
+  final double pxPerMinute;
+
   @override
   Widget build(BuildContext context) {
-    final dayHeight = 24 * 60 * _pxPerMinute;
+    final dayHeight = 24 * 60 * pxPerMinute;
     final isToday =
         _EpgScreenState._jstDateOf(DateTime.now()) ==
         _EpgScreenState._jstDateOf(dayStart);
     final nowOffset = isToday
-        ? DateTime.now().difference(dayStart).inMinutes * _pxPerMinute
+        ? DateTime.now().difference(dayStart).inMinutes * pxPerMinute
         : null;
     return SingleChildScrollView(
       controller: controller,
@@ -891,7 +1096,7 @@ class _DayGrid extends StatelessWidget {
             // Hour gridlines.
             for (var hour = 0; hour <= 24; hour++)
               Positioned(
-                top: hour * 60 * _pxPerMinute,
+                top: hour * 60 * pxPerMinute,
                 left: 0,
                 right: 0,
                 child: const Divider(height: 1),
@@ -935,6 +1140,7 @@ class _DayGrid extends StatelessWidget {
                             onRecord: () =>
                                 onRecordEvent(services[i].channel, event),
                             onWatch: () => onWatchEvent(services[i].channel),
+                            pxPerMinute: pxPerMinute,
                           ),
                       ],
                     ),
@@ -958,9 +1164,11 @@ class _DayGrid extends StatelessWidget {
 /// One event's tile in the day grid.
 ///
 /// A right click (desktop) or a long press (touch) on the
-/// tile opens the programme's menu — 録画 — reserving it
-/// without the trip through the detail dialog (owner
-/// request 2026-11-27). The arrangement is the search
+/// tile opens the programme's menu — 番組情報を見る /
+/// 視聴する / 録画, or 録画解除 for a programme that
+/// already has a reservation (owner requests 2026-11-27
+/// and 2026-11-28; the composition is epg_menu_policy's).
+/// The arrangement is the search
 /// results' row menu's (see _SearchHitRow in
 /// epg_search_screen.dart): an observing pointer listener
 /// over the tile — it never takes the event, so the
@@ -990,6 +1198,7 @@ class _EventTile extends StatefulWidget {
     required this.onDeleteReserved,
     required this.onRecord,
     required this.onWatch,
+    required this.pxPerMinute,
   });
 
   final EpgEvent event;
@@ -1024,9 +1233,14 @@ class _EventTile extends StatefulWidget {
   final VoidCallback onRecord;
 
   /// Opens live viewing for this tile's channel (plan 95);
-  /// the detail dialog offers it only while the event is on
-  /// air.
+  /// the detail dialog — and now the tile's menu — offer
+  /// it only while the event is on air.
   final VoidCallback onWatch;
+
+  /// The grid's density (pixels per broadcast minute) at
+  /// the current zoom: the tile's place and height in the
+  /// day come from it.
+  final double pxPerMinute;
 
   @override
   State<_EventTile> createState() => _EventTileState();
@@ -1108,38 +1322,51 @@ class _EventTileState extends State<_EventTile> {
 
   /// The programme's menu at [position], the search
   /// menu's shape: showMenu over a zero-size rect at the
-  /// press point. A programme that has already ended has
-  /// nothing to offer — the detail dialog offers it no
-  /// reservation either — so no menu opens, and nothing
-  /// is swallowed: a hold's tap tail goes on to open the
-  /// detail, as a plain tap does. When the menu does
-  /// open, the tap tail is swallowed first, so it cannot
-  /// open the detail over the menu.
+  /// press point, its items from epg_menu_policy (the
+  /// official app's shape). A programme that has already
+  /// ended has nothing to offer — the detail dialog offers
+  /// it no reservation either — so no menu opens, and
+  /// nothing is swallowed: a hold's tap tail goes on to
+  /// open the detail, as a plain tap does. When the menu
+  /// does open, the tap tail is swallowed first, so it
+  /// cannot open the detail over the menu.
   Future<void> _showEventMenu(Offset position) async {
-    if (!widget.event.end.isAfter(DateTime.now())) return;
+    final event = widget.event;
+    final actions = epgMenuActions(
+      start: event.start,
+      end: event.end,
+      now: DateTime.now(),
+      reserved: widget.reservedSchedule != null,
+    );
+    if (actions.isEmpty) return;
     _swallowNextTap = true;
     final overlay = Overlay.of(context).context.findRenderObject()!;
-    final chosen = await showMenu<String>(
+    final chosen = await showMenu<EpgMenuAction>(
       context: context,
       position: RelativeRect.fromRect(
         Rect.fromLTWH(position.dx, position.dy, 0, 0),
         Offset.zero & (overlay as RenderBox).size,
       ),
-      items: [
-        PopupMenuItem<String>(
-          value: 'record',
-          child: Row(
-            children: [
-              const Icon(Icons.fiber_manual_record, size: 18),
-              const SizedBox(width: 8),
-              const Text('録画'),
-            ],
-          ),
-        ),
-      ],
+      items: [for (final action in actions) epgMenuItem(action)],
     );
-    if (chosen != 'record' || !mounted) return;
-    widget.onRecord();
+    if (chosen == null || !mounted) return;
+    switch (chosen) {
+      case EpgMenuAction.detail:
+        _openDetail();
+      case EpgMenuAction.watch:
+        widget.onWatch();
+      case EpgMenuAction.record:
+        widget.onRecord();
+      case EpgMenuAction.unrecord:
+        final schedule = widget.reservedSchedule;
+        if (schedule != null) {
+          await confirmAndDeleteGuideReservation(
+            context,
+            schedule: schedule,
+            onDeleteReserved: widget.onDeleteReserved,
+          );
+        }
+    }
   }
 
   void _handleTap() {
@@ -1147,6 +1374,12 @@ class _EventTileState extends State<_EventTile> {
       _swallowNextTap = false;
       return;
     }
+    _openDetail();
+  }
+
+  /// The tile's plain tap (and the menu's 番組情報を見る):
+  /// the shared programme detail dialog.
+  void _openDetail() {
     showEpgEventDetail(
       context,
       reg: widget.reg,
@@ -1168,8 +1401,20 @@ class _EventTileState extends State<_EventTile> {
     final theme = Theme.of(context);
     final startMin = math.max(0, event.start.difference(dayStart).inMinutes);
     final endMin = math.min(24 * 60, event.end.difference(dayStart).inMinutes);
-    final top = startMin * _pxPerMinute;
-    final height = math.max(10, (endMin - startMin) * _pxPerMinute - 1);
+    final top = startMin * widget.pxPerMinute;
+    final height = math.max(
+      10,
+      (endMin - startMin) * widget.pxPerMinute - 1,
+    );
+    // On air right now (epg_onair_policy): the tile's
+    // genre tint deepens and — unless the reserved frame
+    // owns the edge — an accent frame joins it, so the
+    // programme on air reads at a glance. A suppressed
+    // tile stays the plain blank it is: drawing the eye
+    // is exactly what suppression is against.
+    final onAir =
+        !suppressed &&
+        epgEventIsOnAir(start: event.start, end: event.end, now: DateTime.now());
     final title = event.title;
     final timeText = formatTimeJst(event.start);
     final timeStyle = theme.textTheme.labelSmall?.copyWith(
@@ -1192,18 +1437,33 @@ class _EventTileState extends State<_EventTile> {
         onPointerUp: _onTilePointerEnd,
         onPointerCancel: _onTilePointerEnd,
         child: Container(
-          // The reserved frame (plan 120) is a foreground
-          // decoration: it paints over the tile's edge and
-          // leaves the genre tint inside untouched.
-          foregroundDecoration: epgReservedFrame(reserved),
+          // The tile's frame (plan 120, on-air emphasis)
+          // is a foreground decoration: it paints over the
+          // tile's edge and leaves the genre tint inside
+          // untouched. The reserved frame owns the edge
+          // when both apply (epg_onair_policy).
+          foregroundDecoration: epgTileFrame(
+            reserved: reserved,
+            onAir: onAir,
+            onAirColor: theme.colorScheme.primary,
+          ),
           child: Material(
             // Tiles are tinted by the event's genre (plan 86,
             // plan 85 item 10); events without a known genre
             // keep the neutral colour they have always had.
             // A suppressed genre (plan 95) paints the plain
-            // surface instead, with no text below.
+            // surface instead, with no text below. A tile on
+            // air paints the deepened on-air tint instead of
+            // the resting one.
             color: suppressed
                 ? theme.colorScheme.surface
+                : onAir
+                ? epgOnAirTileColor(
+                    genreLevel1: event.genreLevel1,
+                    surface: theme.colorScheme.surface,
+                    fallback: theme.colorScheme.surfaceContainerHighest,
+                    accent: theme.colorScheme.primary,
+                  )
                 : epgGenreTileColor(
                     genreLevel1: event.genreLevel1,
                     surface: theme.colorScheme.surface,
@@ -1354,6 +1614,29 @@ void showEpgEventDetail(
   );
 }
 
+/// One row of the programme menu (see epg_menu_policy.dart
+/// for which actions a programme gets, and their order).
+/// Shared by the guide tile's menu and the search row's
+/// menu, so both offer the same items in the same words.
+PopupMenuItem<EpgMenuAction> epgMenuItem(EpgMenuAction action) {
+  final (icon, label) = switch (action) {
+    EpgMenuAction.detail => (Icons.info_outline, '番組情報を見る'),
+    EpgMenuAction.watch => (Icons.live_tv, '視聴する'),
+    EpgMenuAction.record => (Icons.fiber_manual_record, '録画'),
+    EpgMenuAction.unrecord => (Icons.remove_circle_outline, '録画解除'),
+  };
+  return PopupMenuItem<EpgMenuAction>(
+    value: action,
+    child: Row(
+      children: [
+        Icon(icon, size: 18),
+        const SizedBox(width: 8),
+        Text(label),
+      ],
+    ),
+  );
+}
+
 /// The delete flow behind the detail dialog's
 /// delete-reservation action (plan 124): confirm, delete
 /// the matched reservation on the device, then close the
@@ -1369,22 +1652,63 @@ Future<void> _deleteReservedFromDetail(
   RecordSchedule schedule,
   Future<void> Function(RecordSchedule schedule) onDeleteReserved,
 ) async {
+  final deleted = await _deleteReservedConfirmed(
+    context,
+    schedule,
+    onDeleteReserved,
+  );
+  if (!deleted) return;
+  if (context.mounted) {
+    Navigator.of(dialogContext).pop();
+    showSnack(context, '予約を削除しました');
+  }
+}
+
+/// The confirmation and the device call behind deleting a
+/// guide programme's reservation, shared by the detail
+/// dialog's delete action and the programme menus'
+/// 録画解除 (owner request 2026-11-28): one confirmation,
+/// never two. True when the reservation was deleted. A
+/// refusal from the device is reported here and answers
+/// false, so the caller keeps whatever it has open; the
+/// success report is the caller's, so it can first close
+/// what it has open (the detail dialog).
+Future<bool> _deleteReservedConfirmed(
+  BuildContext context,
+  RecordSchedule schedule,
+  Future<void> Function(RecordSchedule schedule) onDeleteReserved,
+) async {
   final ok = await confirmDialog(
     context,
     title: '予約を削除',
     message: '${formatDateTimeWithWeekdayJst(schedule.start)} の予約を削除しますか？',
   );
-  if (!ok) return;
+  if (!ok) return false;
   try {
     await onDeleteReserved(schedule);
   } on NasneError catch (e) {
     if (context.mounted) showSnack(context, userMessageForError(e));
-    return;
+    return false;
   }
-  if (context.mounted) {
-    Navigator.of(dialogContext).pop();
-    showSnack(context, '予約を削除しました');
-  }
+  return true;
+}
+
+/// Deletes a guide programme's reservation from its menu
+/// — the guide tile's and the search row's 録画解除: the
+/// detail dialog's delete flow (see
+/// [_deleteReservedConfirmed]) with no dialog to close:
+/// confirm, delete, report.
+Future<void> confirmAndDeleteGuideReservation(
+  BuildContext context, {
+  required RecordSchedule schedule,
+  required Future<void> Function(RecordSchedule schedule) onDeleteReserved,
+}) async {
+  final deleted = await _deleteReservedConfirmed(
+    context,
+    schedule,
+    onDeleteReserved,
+  );
+  if (deleted && context.mounted) showSnack(context, '予約を削除しました');
 }
 
 class EpgEventDetailDialog extends StatelessWidget {

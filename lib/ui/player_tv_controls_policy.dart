@@ -129,3 +129,17 @@ bool tvRemoteKeyActionClaims(TvRemoteKeyAction action) => switch (action) {
   TvRemoteKeyAction.skipBackward => true,
   TvRemoteKeyAction.poke || TvRemoteKeyAction.pass => false,
 };
+
+/// Whether the player screen should put the video into
+/// fullscreen on its own as playback opens (owner request
+/// 2026-11-28: on the TV, playback should simply start
+/// fullscreen — reaching for the bar's fullscreen button
+/// first is one step too many). TV variant only, only
+/// until it has been asked for once (the viewer who
+/// leaves fullscreen by hand is not dragged back), and
+/// never when the video is already fullscreen.
+bool shouldAutoEnterFullscreen({
+  required bool tvVariant,
+  required bool alreadyFullscreen,
+  required bool alreadyRequested,
+}) => tvVariant && !alreadyFullscreen && !alreadyRequested;

@@ -1584,7 +1584,11 @@ void main() {
       ],
     );
 
-    Widget tileHost(_TileMenuFakeSchedules schedules, EpgGuide guide) {
+    Widget tileHost(
+      _TileMenuFakeSchedules schedules,
+      EpgGuide guide, {
+      List<LiveBand>? liveBands,
+    }) {
       final bundle = DeviceServices(
         deviceInfo: _TileMenuStubDeviceInfo(),
         settings: _TileMenuStubSettings(),
@@ -1604,6 +1608,8 @@ void main() {
             (ref, r) async => const <int, List<int>>{},
           ),
           deviceServicesProvider.overrideWith((ref, r) => bundle),
+          if (liveBands != null)
+            liveChannelsProvider.overrideWith((ref, r) async => liveBands),
         ],
         child: const MaterialApp(home: EpgScreen()),
       );
@@ -1698,6 +1704,195 @@ void main() {
       expect(find.text('予約を作成しました'), findsOneWidget);
     });
 
+    testWidgets(
+        'the menu of an on-air programme offers watching, and '
+        '視聴する opens the live detail page', (tester) async {
+      final schedules = _TileMenuFakeSchedules();
+      final start = DateTime.now().subtract(const Duration(minutes: 10));
+      await pumpGuide(
+        tester,
+        tileHost(
+          schedules,
+          tileGuide(
+            EpgEvent(
+              eventId: 1,
+              start: start,
+              duration: const Duration(minutes: 60),
+              title: '放送中の番組',
+            ),
+          ),
+          liveBands: const [
+            LiveBand(
+              containerId: '0/video/LiveTuner/DTTB',
+              title: '地上デジタル',
+              channels: [
+                LiveChannel(
+                  id: '0/video/LiveTuner/DTTB/ch?nid=1111&tsid=2222&svid=3333',
+                  bandId: '0/video/LiveTuner/DTTB',
+                  networkId: 0x1111,
+                  transportStreamId: 0x2222,
+                  serviceId: 0x3333,
+                  channelName: 'テスト局',
+                  programTitle: 'ライブ番組',
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      expect(find.text('放送中の番組'), findsOneWidget);
+
+      await tester.longPress(find.text('放送中の番組'));
+      await tester.pumpAndSettle();
+
+      // The official app's shape: info, watch (on air only),
+      // record — and no un-record for an unreserved programme.
+      expect(find.text('番組情報を見る'), findsOneWidget);
+      expect(find.text('視聴する'), findsOneWidget);
+      expect(find.text('録画'), findsOneWidget);
+      expect(find.text('録画解除'), findsNothing);
+
+      await tester.tap(find.text('視聴する'));
+      await tester.pumpAndSettle();
+
+      // The live detail page for the guide's channel.
+      expect(find.text('ライブ番組'), findsOneWidget);
+    });
+
+    testWidgets('番組情報を見る in the menu opens the detail dialog',
+        (tester) async {
+      final schedules = _TileMenuFakeSchedules();
+      final start = DateTime.now().add(const Duration(minutes: 30));
+      await pumpGuide(
+        tester,
+        tileHost(
+          schedules,
+          tileGuide(
+            EpgEvent(
+              eventId: 1,
+              start: start,
+              duration: const Duration(minutes: 30),
+              title: 'これからの番組',
+            ),
+          ),
+        ),
+      );
+
+      await tester.longPress(find.text('これからの番組'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('番組情報を見る'));
+      await tester.pumpAndSettle();
+
+      // The same dialog a plain tap opens: its reservation
+      // action is there, and the menu is gone.
+      expect(find.text('録画予約'), findsOneWidget);
+      expect(find.text('番組情報を見る'), findsNothing);
+      expect(schedules.created, isEmpty);
+    });
+
+    testWidgets(
+        'a reserved programme offers 録画解除 in place of 録画, and '
+        'deleting runs the one confirmation before the device call',
+        (tester) async {
+      final schedules = _TileMenuFakeSchedules();
+      final start = DateTime.now().add(const Duration(minutes: 30));
+      schedules.items.add(
+        RecordSchedule(
+          id: '700',
+          start: start,
+          durationSeconds: 30 * 60,
+          conditionId: '1',
+          channel: const ScheduleChannel(
+            broadcastingType: 2,
+            channelType: 2,
+            serviceId: 0x3333,
+          ),
+          desiredQualityMode: 100,
+          desiredMatchingId: '0x1111,0x2222,0x3333,0x0001',
+          reservationCreatorId: '2000',
+          priorityFlag: 0,
+          recordDestinationId: 'HDD',
+        ),
+      );
+      await pumpGuide(
+        tester,
+        tileHost(
+          schedules,
+          tileGuide(
+            EpgEvent(
+              eventId: 1,
+              start: start,
+              duration: const Duration(minutes: 30),
+              title: '予約済みの番組',
+            ),
+          ),
+        ),
+      );
+      expect(find.text('予約済みの番組'), findsOneWidget);
+
+      await tester.longPress(find.text('予約済みの番組'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('録画解除'), findsOneWidget);
+      expect(find.text('録画'), findsNothing);
+
+      await tester.tap(find.text('録画解除'));
+      await tester.pumpAndSettle();
+
+      // The detail dialog's own confirmation stands between
+      // the menu and the device: nothing is deleted yet.
+      expect(find.text('予約を削除'), findsOneWidget);
+      expect(schedules.deleted, isEmpty);
+
+      await tester.tap(find.text('削除'));
+      await tester.pumpAndSettle();
+
+      expect(schedules.deleted, ['700']);
+      expect(find.text('予約を削除しました'), findsOneWidget);
+    });
+
+    testWidgets('a pinch on the grid zooms the day density in',
+        (tester) async {
+      final schedules = _TileMenuFakeSchedules();
+      final start = DateTime.now().add(const Duration(minutes: 30));
+      await pumpGuide(
+        tester,
+        tileHost(
+          schedules,
+          tileGuide(
+            EpgEvent(
+              eventId: 1,
+              start: start,
+              duration: const Duration(minutes: 30),
+              title: 'これからの番組',
+            ),
+          ),
+        ),
+      );
+      final tile = find.ancestor(
+        of: find.text('これからの番組'),
+        matching: find.byType(InkWell),
+      );
+      expect(tile, findsOneWidget);
+      // 30 minutes at the base density (2.4 px/min), minus
+      // the tile's 1px gap.
+      expect(tester.getSize(tile).height, closeTo(71, 0.6));
+
+      final center = tester.getCenter(tile);
+      final first = await tester.startGesture(center + const Offset(0, -20));
+      final second = await tester.startGesture(center + const Offset(0, 20));
+      await first.moveBy(const Offset(0, -20));
+      await second.moveBy(const Offset(0, 20));
+      await tester.pumpAndSettle();
+      await first.up();
+      await second.up();
+      await tester.pumpAndSettle();
+
+      // The fingers doubled their distance: the tile is
+      // twice as tall (30 minutes at 4.8 px/min).
+      expect(tester.getSize(tile).height, closeTo(143, 1.5));
+    });
+
     testWidgets('a programme that has ended offers no menu; the hold '
         'goes on to the detail, which offers it no reservation', (
       tester,
@@ -1742,6 +1937,7 @@ void main() {
 class _TileMenuFakeSchedules implements ScheduleService {
   final List<RecordSchedule> items = [];
   final List<NewRecordSchedule> created = [];
+  final List<String> deleted = [];
 
   @override
   Future<List<RecordSchedule>> listSchedules({
@@ -1759,7 +1955,9 @@ class _TileMenuFakeSchedules implements ScheduleService {
   Future<void> updateSchedule(ScheduleUpdate update) async {}
 
   @override
-  Future<void> deleteSchedule(String id) async {}
+  Future<void> deleteSchedule(String id) async {
+    deleted.add(id);
+  }
 
   @override
   Future<List<RecordSchedule>> checkConflicts(

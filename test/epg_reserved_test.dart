@@ -539,7 +539,11 @@ void main() {
         friendlyName: 'nasne',
         macAddr: '00:11:22:33:44:55',
       );
-      final now = DateTime.now().toUtc();
+      // The event sits in the future: this test is about
+      // the reserved frame alone, and an event on air
+      // would keep the on-air frame after the deletion
+      // (epg_onair_policy).
+      final start = DateTime.now().toUtc().add(const Duration(hours: 1));
       final guide = EpgGuide(
         broadcastingType: 2,
         services: [
@@ -548,7 +552,7 @@ void main() {
             events: [
               EpgEvent(
                 eventId: 1,
-                start: now,
+                start: start,
                 duration: const Duration(minutes: 30),
                 title: '予約済み番組',
                 genreLevel1: 3,
@@ -560,7 +564,7 @@ void main() {
       final schedules = _FakeSchedules([
         _schedule(
           id: '42',
-          start: now,
+          start: start,
           desiredMatchingId: '0x1111,0x2222,0x3333,0x0001',
         ),
       ]);

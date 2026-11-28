@@ -36,6 +36,11 @@
 ///    controls first, the way TV players treat back.
 ///  * Media keys (play / pause / fast-forward / rewind)
 ///    act directly, with the controls coming up alongside.
+///  * In fullscreen, the heading rides at the top of the
+///    picture while the controls are up: fullscreen has
+///    no app bar to show what is playing, so the OK key
+///    that raises the controls raises the title with
+///    them (owner request 2026-11-28).
 ///
 /// The standard variant never builds this widget: it keeps
 /// the stock adaptive controls exactly as before.
@@ -78,6 +83,7 @@ class TvVideoControls extends StatefulWidget {
     required this.onSeek,
     required this.onToggleFullscreen,
     required this.isFullscreen,
+    required this.title,
     this.onProgrammeAction,
     this.programmeState = LiveProgrammeReservationState.none,
   });
@@ -132,6 +138,16 @@ class TvVideoControls extends StatefulWidget {
   /// Whether the video is currently fullscreen, read at
   /// build time for the fullscreen button's icon.
   final bool Function() isFullscreen;
+
+  /// The heading the player screen's app bar shows — a
+  /// recording's title, or the channel being watched.
+  /// While the controls are up in fullscreen it is shown
+  /// again at the top of the picture (owner request
+  /// 2026-11-28): fullscreen has no app bar, so the OK
+  /// key raising the controls is also how the viewer
+  /// asks what is playing. Outside fullscreen the app
+  /// bar already carries it, so the overlay stays out.
+  final String title;
 
   /// Works on the programme now on air (live viewing
   /// only; user-fork addition, 2026-11-26): the player
@@ -311,9 +327,44 @@ class _TvVideoControlsState extends State<TvVideoControls> {
             autofocus: true,
             child: const SizedBox.expand(),
           ),
+          // The title at the top of the picture, up and
+          // down with the controls — in fullscreen only,
+          // where no app bar shows it (see [title]).
+          if (_visible && widget.isFullscreen())
+            Positioned(left: 0, right: 0, top: 0, child: _buildTitleBar()),
           if (_visible)
             Positioned(left: 0, right: 0, bottom: 0, child: _buildBar()),
         ],
+      ),
+    );
+  }
+
+  /// The title bar at the top of the picture: the heading
+  /// on a scrim that fades into the video, the mirror of
+  /// the transport bar's. Display only — it takes no
+  /// focus and no pointer input, so D-pad traversal in
+  /// the bar below is exactly as before.
+  Widget _buildTitleBar() {
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.black87, Colors.transparent],
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(32, 20, 32, 36),
+        child: Text(
+          widget.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 20,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
       ),
     );
   }

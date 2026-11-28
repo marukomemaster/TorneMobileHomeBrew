@@ -7,8 +7,15 @@
 /// properties each mode sets, the video controller's
 /// hardware acceleration), the notifier's persistence, and
 /// the settings wiring, including the picker dialog's TV
-/// initial focus (plan 134). The design lives in
-/// ui/player_hwdec_policy.dart.
+/// initial focus (plan 134). The TV variant's unset default
+/// is software — full software decoding: plan 139's unit
+/// recovered with MPEG-2-only software, but the fork
+/// owner's Fire OS 7 unit stayed black there because its
+/// H.264 hardware path produces no picture either
+/// (measured on the real device, 2026-11-28), so a
+/// first-run TV viewer gets the way around without finding
+/// the setting first; a stored mode still wins. The design
+/// lives in ui/player_hwdec_policy.dart.
 library;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -74,6 +81,31 @@ void main() {
       expect(parseVideoHwdecMode('AUTO'), VideoHwdecMode.auto);
     });
 
+    test('parse honours a caller fallback for anything unknown', () {
+      expect(
+        parseVideoHwdecMode(null, fallback: VideoHwdecMode.mpeg2Software),
+        VideoHwdecMode.mpeg2Software,
+      );
+      expect(
+        parseVideoHwdecMode('junk', fallback: VideoHwdecMode.mpeg2Software),
+        VideoHwdecMode.mpeg2Software,
+      );
+      // A stored name still wins over the fallback.
+      expect(
+        parseVideoHwdecMode('auto', fallback: VideoHwdecMode.mpeg2Software),
+        VideoHwdecMode.auto,
+      );
+    });
+
+    test('the unset default is auto except on TV', () {
+      expect(defaultVideoHwdecMode(isTv: false), VideoHwdecMode.auto);
+      // TV: full software — the fork owner's Fire OS 7 unit
+      // produces no picture on the H.264 hardware path
+      // either (2026-11-28), so MPEG-2-only software is
+      // not enough there.
+      expect(defaultVideoHwdecMode(isTv: true), VideoHwdecMode.software);
+    });
+
     test('the MPEG-2-only codec list excludes mpeg2video only', () {
       final codecs = mpeg2SoftwareHwdecCodecs.split(',');
       expect(
@@ -129,9 +161,14 @@ void main() {
       keyValues = InMemoryKeyValueStore();
     });
 
-    ProviderContainer makeContainer() {
+    ProviderContainer makeContainer({
+      AppVariant variant = AppVariant.standard,
+    }) {
       final container = ProviderContainer(
-        overrides: [keyValueStoreProvider.overrideWithValue(keyValues)],
+        overrides: [
+          keyValueStoreProvider.overrideWithValue(keyValues),
+          appVariantProvider.overrideWithValue(variant),
+        ],
       );
       addTearDown(container.dispose);
       return container;
@@ -142,6 +179,30 @@ void main() {
       container.read(videoHwdecModeProvider);
       await flush();
       expect(container.read(videoHwdecModeProvider), VideoHwdecMode.auto);
+    });
+
+    test('nothing stored means software on TV', () async {
+      final container = makeContainer(variant: AppVariant.tv);
+      container.read(videoHwdecModeProvider);
+      await flush();
+      expect(container.read(videoHwdecModeProvider), VideoHwdecMode.software);
+    });
+
+    test('a stored mode still wins on TV', () async {
+      await keyValues.write('video_hwdec_mode', 'auto');
+      final container = makeContainer(variant: AppVariant.tv);
+      container.read(videoHwdecModeProvider);
+      await flush();
+      expect(container.read(videoHwdecModeProvider), VideoHwdecMode.auto);
+    });
+
+    test('an unknown stored value falls back to the TV default on TV', (
+      ) async {
+      await keyValues.write('video_hwdec_mode', 'everything');
+      final container = makeContainer(variant: AppVariant.tv);
+      container.read(videoHwdecModeProvider);
+      await flush();
+      expect(container.read(videoHwdecModeProvider), VideoHwdecMode.software);
     });
 
     test('a stored mode is restored', () async {
@@ -204,6 +265,15 @@ void main() {
       expect(find.text('自動'), findsOneWidget);
     });
 
+    testWidgets('on TV, full software is the default shown', (tester) async {
+      await pumpSetting(
+        tester,
+        InMemoryKeyValueStore(),
+        variant: AppVariant.tv,
+      );
+      expect(find.text('すべてソフトウェア'), findsOneWidget);
+    });
+
     testWidgets('a saved mode is the one shown', (tester) async {
       final keyValues = InMemoryKeyValueStore();
       await keyValues.write('video_hwdec_mode', 'software');
@@ -259,18 +329,19 @@ void main() {
         variant: AppVariant.tv,
       );
 
-      await tester.tap(find.text('自動'));
+      await tester.tap(find.text('すべてソフトウェア'));
       await tester.pumpAndSettle();
       expect(find.byType(AlertDialog), findsOneWidget);
 
       // The focused row is the one for the mode in force
-      // (auto): its ListTile inside the dialog (plan 134).
-      final autoTile = find.descendant(
+      // (software, the TV unset default): its ListTile
+      // inside the dialog (plan 134).
+      final softwareTile = find.descendant(
         of: find.byType(AlertDialog),
-        matching: find.widgetWithText(ListTile, '自動'),
+        matching: find.widgetWithText(ListTile, 'すべてソフトウェア'),
       );
-      expect(autoTile, findsOneWidget);
-      expect(focusIsInside(autoTile), isTrue);
+      expect(softwareTile, findsOneWidget);
+      expect(focusIsInside(softwareTile), isTrue);
     });
 
     testWidgets('on the standard variant the picker opens unfocused', (

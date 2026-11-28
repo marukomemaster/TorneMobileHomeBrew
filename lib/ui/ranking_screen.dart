@@ -1,8 +1,14 @@
 /// Ranking screen (user-fork addition, owner
-/// request 2026-11-27): three views over the same
+/// request 2026-11-27): four views over the same
 /// computations the auto pick runs on, for the
 /// selected nasne.
 ///
+/// - 放送中 (on air, added 2026-11-28): the programmes
+///   on air now, ranked by the same score — the
+///   SideView-style home the owner asked for, minus
+///   the popularity counts no local data can supply
+///   (see onair_ranking_policy.dart). The first tab
+///   and the opening view.
 /// - 傾向 (tendency): what the viewer records,
 ///   counted by genre, channel and series — the
 ///   profile the auto pick scores against.
@@ -17,10 +23,12 @@
 ///   already reserved marked as its own.
 ///
 /// Nothing here computes a second, private version
-/// of the ranking: every number comes from
+/// of the ranking: every score comes from
 /// auto_pick_policy.dart, so the screen cannot
 /// promise what the checker would not do.
 library;
+
+import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
@@ -35,9 +43,11 @@ import 'auto_record_policy.dart';
 import 'epg_genre.dart';
 import 'epg_reserved.dart';
 import 'epg_screen.dart';
+import 'onair_ranking_policy.dart';
 import 'epg_search.dart';
 import 'format.dart';
 import 'live_screen.dart';
+import 'tv_focus.dart';
 
 class RankingScreen extends ConsumerStatefulWidget {
   const RankingScreen({super.key});
@@ -47,7 +57,11 @@ class RankingScreen extends ConsumerStatefulWidget {
 }
 
 class _RankingScreenState extends ConsumerState<RankingScreen> {
-  int _view = 0;
+  // The opening view is 放送中: the screen opens on
+  // what is on now, the way the compared app's home
+  // does. Its segment leads the row but keeps value 3,
+  // so the three original views keep their values.
+  int _view = 3;
 
   @override
   Widget build(BuildContext context) {
@@ -62,6 +76,7 @@ class _RankingScreenState extends ConsumerState<RankingScreen> {
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
                   child: SegmentedButton<int>(
                     segments: const [
+                      ButtonSegment(value: 3, label: Text('放送中')),
                       ButtonSegment(value: 0, label: Text('傾向')),
                       ButtonSegment(value: 1, label: Text('おすすめ')),
                       ButtonSegment(value: 2, label: Text('自動候補')),
@@ -75,7 +90,8 @@ class _RankingScreenState extends ConsumerState<RankingScreen> {
                   child: switch (_view) {
                     0 => _TendencyView(reg: reg),
                     1 => _RecommendView(reg: reg),
-                    _ => _CandidatesView(reg: reg),
+                    2 => _CandidatesView(reg: reg),
+                    _ => _OnAirView(reg: reg),
                   },
                 ),
               ],
@@ -119,6 +135,21 @@ _RankingData _rankingData(WidgetRef ref, RegisteredNasne reg) {
     hits,
     schedules,
     autoPickProfileFor(titles: titles, schedules: schedules, guideHits: hits),
+  );
+}
+
+/// A list of display-only rows, each wrapped in a
+/// TvFocusAnchor: on the TV variant nothing else in such
+/// a list can take focus, and a lazily built list only
+/// builds what traversal has scrolled into view — edge
+/// anchors alone would leave the tail unbuilt and
+/// unreachable, so every row is a traversal stop that
+/// scrolls the next rows in (plan 123's rule). On the
+/// standard variant the anchors are the identity and
+/// the list is unchanged.
+Widget _tvTraversableList(List<Widget> rows) {
+  return ListView(
+    children: [for (final row in rows) TvFocusAnchor(child: row)],
   );
 }
 
@@ -187,36 +218,41 @@ class _TendencyView extends ConsumerWidget {
         ...rows,
       ],
     );
-    Widget rankRow(int rank, String label, int count) => ListTile(
-      leading: Text(
-        '$rank',
-        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+    // TV: every ranking row is wrapped in a
+    // TvFocusAnchor (below) — the rows are display-only,
+    // and a lazily built list only builds what traversal
+    // has scrolled into view, so each row must be a
+    // traversal stop for the D-pad to walk the list.
+    Widget rankRow(int rank, String label, int count) => TvFocusAnchor(
+      child: ListTile(
+        leading: Text(
+          '$rank',
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        title: Text(label),
+        trailing: Text('$count 件'),
+        dense: true,
       ),
-      title: Text(label),
-      trailing: Text('$count 件'),
-      dense: true,
     );
-    return ListView(
-      children: [
-        section('ジャンル別', [
-          for (final (i, entry) in profile.genreRanking.take(10).indexed)
-            rankRow(
-              i + 1,
-              epgGenreLabel(entry.genreLevel1) ?? 'ジャンル ${entry.genreLevel1}',
-              entry.count,
-            ),
-        ]),
-        section('チャンネル別', [
-          for (final (i, entry) in profile.channelRanking.take(10).indexed)
-            rankRow(i + 1, entry.name, entry.count),
-        ]),
-        section('シリーズ別', [
-          for (final (i, entry) in profile.seriesRanking.take(10).indexed)
-            rankRow(i + 1, entry.title, entry.count),
-        ]),
-        const SizedBox(height: 24),
-      ],
-    );
+    final sections = [
+      section('ジャンル別', [
+        for (final (i, entry) in profile.genreRanking.take(10).indexed)
+          rankRow(
+            i + 1,
+            epgGenreLabel(entry.genreLevel1) ?? 'ジャンル ${entry.genreLevel1}',
+            entry.count,
+          ),
+      ]),
+      section('チャンネル別', [
+        for (final (i, entry) in profile.channelRanking.take(10).indexed)
+          rankRow(i + 1, entry.name, entry.count),
+      ]),
+      section('シリーズ別', [
+        for (final (i, entry) in profile.seriesRanking.take(10).indexed)
+          rankRow(i + 1, entry.title, entry.count),
+      ]),
+    ];
+    return ListView(children: [...sections, const SizedBox(height: 24)]);
   }
 }
 
@@ -369,11 +405,10 @@ class _CandidatesView extends ConsumerWidget {
         Expanded(
           child: plan.candidates.isEmpty
               ? const Center(child: Text('候補はまだありません。'))
-              : ListView.builder(
-                  itemCount: plan.candidates.take(30).length,
-                  itemBuilder: (context, index) {
-                    final candidate = plan.candidates[index];
-                    return _scoredRow(
+              : _tvTraversableList([
+                  for (final (index, candidate)
+                      in plan.candidates.take(30).indexed)
+                    _scoredRow(
                       rank: index + 1,
                       hit: candidate.hit,
                       score: candidate.score,
@@ -387,10 +422,315 @@ class _CandidatesView extends ConsumerWidget {
                         AutoPickDisposition.overLimit => '上限のため対象外',
                         AutoPickDisposition.capacityBlocked => '容量ガードで停止中',
                       },
-                    );
-                  },
-                ),
+                    ),
+                ]),
         ),
+      ],
+    );
+  }
+}
+
+/// The channel logo bytes for one hit, from the logo
+/// maps the guide screen reads: terrestrial and BS
+/// fetch logos; CS fetches none (plan 137), so a CS
+/// programme's card falls back to its genre block.
+List<int>? _onAirLogoFor(
+  EpgSearchHit hit,
+  Map<int, List<int>> terrestrialLogos,
+  Map<int, List<int>> bsLogos,
+) {
+  final logos = switch (hit.channel.broadcastingType) {
+    2 => terrestrialLogos,
+    3 => bsLogos,
+    _ => const <int, List<int>>{},
+  };
+  return logos[hit.channel.serviceId];
+}
+
+/// The 放送中 badge: the official wording in the red
+/// the official apps mark live programmes with (the
+/// same red family as the guide's reserved frame).
+Widget _onAirBadge() => Container(
+  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+  decoration: BoxDecoration(
+    color: const Color(0xFFD32F2F),
+    borderRadius: BorderRadius.circular(4),
+  ),
+  child: const Text(
+    '放送中',
+    style: TextStyle(
+      color: Colors.white,
+      fontSize: 11,
+      fontWeight: FontWeight.bold,
+    ),
+  ),
+);
+
+/// The medal colours of the top three ranks, the
+/// compared app's crown chips read as: gold, silver,
+/// bronze.
+Color _onAirRankColor(int rank) => switch (rank) {
+  1 => const Color(0xFFFFC107),
+  2 => const Color(0xFFB0BEC5),
+  _ => const Color(0xFFBC7A45),
+};
+
+/// One of the top three on-air programmes, as a large
+/// card: a header band carrying the channel logo (or,
+/// without one, the genre colour block with the genre
+/// named), then the title, channel, time span and the
+/// 放送中 badge. No still image is shown: the unit
+/// serves no programme stills for guide events.
+class _OnAirCard extends StatelessWidget {
+  const _OnAirCard({
+    required this.rank,
+    required this.entry,
+    required this.logo,
+    required this.onTap,
+  });
+
+  final int rank;
+  final OnAirRankedProgramme entry;
+  final List<int>? logo;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final event = entry.hit.event;
+    final genreColor = epgGenreColor(event.genreLevel1);
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              height: 96,
+              color:
+                  genreColor?.withAlpha(217) ??
+                  theme.colorScheme.surfaceContainerHighest,
+              alignment: Alignment.center,
+              child: logo != null
+                  ? Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Image.memory(
+                        Uint8List.fromList(logo!),
+                        height: 44,
+                        fit: BoxFit.contain,
+                      ),
+                    )
+                  : Text(
+                      epgGenreLabel(event.genreLevel1) ?? entry.hit.channelName,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _onAirRankColor(rank),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          '$rank位',
+                          style: const TextStyle(
+                            color: Colors.black87,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      _onAirBadge(),
+                      const Spacer(),
+                      Text(
+                        'スコア ${entry.score.total}',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    event.title ?? '（タイトルなし）',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${entry.hit.channelName} ・ '
+                    '${formatTimeJst(event.start)}–${formatTimeJst(event.end)}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One on-air programme below the top three: a compact
+/// row with a small channel logo (or, without one, a
+/// genre colour block), the title, where and when, and
+/// the rank.
+class _OnAirRow extends StatelessWidget {
+  const _OnAirRow({
+    required this.rank,
+    required this.entry,
+    required this.logo,
+    required this.onTap,
+  });
+
+  final int rank;
+  final OnAirRankedProgramme entry;
+  final List<int>? logo;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final event = entry.hit.event;
+    return ListTile(
+      leading: SizedBox(
+        width: 56,
+        height: 32,
+        child: logo != null
+            ? Image.memory(Uint8List.fromList(logo!), fit: BoxFit.contain)
+            : DecoratedBox(
+                decoration: BoxDecoration(
+                  color:
+                      epgGenreColor(event.genreLevel1)?.withAlpha(160) ??
+                      Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+      ),
+      title: Text(
+        event.title ?? '（タイトルなし）',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        '${entry.hit.channelName} ・ '
+        '${formatTimeJst(event.start)}–${formatTimeJst(event.end)} ・ '
+        'スコア ${entry.score.total}',
+      ),
+      trailing: Text(
+        '$rank',
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+      ),
+      onTap: onTap,
+    );
+  }
+}
+
+/// 放送中: the programmes on air now, ranked by the
+/// tendency score (onair_ranking_policy.dart). The top
+/// three are large cards; the rest are compact rows
+/// with a small channel logo (or genre block). A tap
+/// opens the programme's usual detail — the same
+/// dialog the guide, the search and おすすめ open —
+/// so watching and reserving take the existing paths.
+class _OnAirView extends ConsumerWidget {
+  const _OnAirView({required this.reg});
+
+  final RegisteredNasne reg;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final data = _rankingData(ref, reg);
+    final ranked = rankOnAirProgrammes(
+      hits: data.hits,
+      profile: data.profile,
+      now: DateTime.now(),
+    );
+    if (ranked.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            '放送中の番組がまだありません。番組表が読み込まれると、今放送している番組がここに並びます。',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+    final terrestrialLogos =
+        ref.watch(channelLogosProvider(reg)).value ?? const <int, List<int>>{};
+    final bsLogos =
+        ref.watch(bsChannelLogosProvider(reg)).value ?? const <int, List<int>>{};
+    final reservedIndex = EpgReservedIndex.fromSchedules(data.schedules);
+    void openDetail(OnAirRankedProgramme entry) {
+      final hit = entry.hit;
+      showEpgEventDetail(
+        context,
+        reg: reg,
+        channel: hit.channel,
+        channelName: hit.channelName,
+        event: hit.event,
+        reservedSchedule: reservedIndex.scheduleFor(hit.channel, hit.event),
+        onDeleteReserved: (schedule) =>
+            deleteScheduleAndInvalidate(ref, reg, schedule),
+        onWatch: () =>
+            openLiveChannelForEpg(context, ref, reg: reg, channel: hit.channel),
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+      children: [
+        for (final (index, entry) in ranked.indexed)
+          TvFocusAnchor(
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: index < 3
+                  ? _OnAirCard(
+                      rank: index + 1,
+                      entry: entry,
+                      logo: _onAirLogoFor(
+                        entry.hit,
+                        terrestrialLogos,
+                        bsLogos,
+                      ),
+                      onTap: () => openDetail(entry),
+                    )
+                  : _OnAirRow(
+                      rank: index + 1,
+                      entry: entry,
+                      logo: _onAirLogoFor(
+                        entry.hit,
+                        terrestrialLogos,
+                        bsLogos,
+                      ),
+                      onTap: () => openDetail(entry),
+                    ),
+            ),
+          ),
       ],
     );
   }

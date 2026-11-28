@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/core.dart';
+import '../ui/epg_zoom_policy.dart';
 import '../ui/player_hwdec_policy.dart';
 import 'ake_socket.dart';
 import 'credential_downloads.dart';
@@ -453,12 +454,48 @@ final playbackBufferProvider = NotifierProvider<PlaybackBufferNotifier, int>(
   PlaybackBufferNotifier.new,
 );
 
+/// The programme guide's zoom scale (owner request
+/// 2026-11-28; see ui/epg_zoom_policy.dart for the scale
+/// and its range). The state is the scale itself, 1 until
+/// the viewer pinches the guide. Persisted in the
+/// key-value store as a plain double literal; an
+/// unparseable or out-of-range stored value reads back
+/// clamped or defaulted by the policy, never as an error.
+/// The guide screen watches it, so a restored value
+/// applies as soon as it lands.
+class EpgZoomNotifier extends Notifier<double> {
+  static const _key = 'epg_zoom_scale';
+
+  @override
+  double build() {
+    final store = ref.watch(keyValueStoreProvider);
+    Future.microtask(() async {
+      final value = await store.read(_key);
+      state = decodeEpgZoomScale(value);
+    });
+    return epgDefaultZoomScale;
+  }
+
+  Future<void> set(double scale) async {
+    final normalized = clampEpgZoomScale(scale);
+    state = normalized;
+    await ref.read(keyValueStoreProvider).write(_key, '$normalized');
+  }
+}
+
+final epgZoomProvider = NotifierProvider<EpgZoomNotifier, double>(
+  EpgZoomNotifier.new,
+);
+
 /// The viewer's video decode mode (plan 139): how much of the
 /// video decoding mpv may hand to the device's hardware
 /// decoder (see ui/player_hwdec_policy.dart for the modes and
-/// the failure they answer). The state is a VideoHwdecMode;
-/// auto — nothing stored — leaves mpv's and media_kit_video's
-/// defaults exactly as they were. The player screen snapshots
+/// the failure they answer). The state is a VideoHwdecMode.
+/// Nothing stored reads as the variant's default
+/// (defaultVideoHwdecMode): auto on the standard variant,
+/// which leaves mpv's and media_kit_video's defaults exactly
+/// as they were, and software (full software decoding) on
+/// the TV variant. A mode the viewer stored always wins. The player screen snapshots
 /// the value as it opens, so a change applies from the next
 /// playback.
 class VideoHwdecModeNotifier extends Notifier<VideoHwdecMode> {
@@ -467,11 +504,14 @@ class VideoHwdecModeNotifier extends Notifier<VideoHwdecMode> {
   @override
   VideoHwdecMode build() {
     final store = ref.watch(keyValueStoreProvider);
+    final fallback = defaultVideoHwdecMode(
+      isTv: ref.watch(appVariantProvider).isTv,
+    );
     Future.microtask(() async {
       final value = await store.read(_key);
-      state = parseVideoHwdecMode(value);
+      state = parseVideoHwdecMode(value, fallback: fallback);
     });
-    return VideoHwdecMode.auto;
+    return fallback;
   }
 
   Future<void> set(VideoHwdecMode mode) async {

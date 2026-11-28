@@ -20,22 +20,23 @@
 /// when it settles, not a full rescan per character.
 ///
 /// A right click (desktop) or a long press (touch) on a
-/// result row opens that programme's menu — 録画 —
-/// reserving it without the trip through the detail
-/// dialog (owner request 2026-11-26). The menu is the
+/// result row opens that programme's menu — the guide
+/// tile's menu, same items in the same words (see
+/// epg_menu_policy.dart): 番組情報を見る / 視聴する /
+/// 録画, with 録画解除 in place of 録画 for a programme
+/// that already has a reservation (owner requests
+/// 2026-11-26 and 2026-11-28). The menu is the
 /// recorded-titles list's row menu's kin: an observing
 /// pointer listener over the row, a right click answered
 /// at once and a touch hold timed from the same listener,
 /// and showMenu at the press point. The reservation runs
 /// the shared guide-event create (see recordGuideEvent)
-/// and reports its outcome with that path's wording; a
-/// programme already reserved is reported as such by the
-/// create, so the item is always offered the same way —
-/// the titles menu's stance, whose 削除 likewise lets the
-/// shared flow refuse. A programme that has already
-/// ended offers no menu at all: the detail dialog offers
-/// it no reservation either, and there is nothing else
-/// for the menu to carry.
+/// and reports its outcome with that path's wording; the
+/// un-reservation runs the guide detail's delete flow
+/// (confirmAndDeleteGuideReservation). A programme that
+/// has already ended offers no menu at all: the detail
+/// dialog offers it no reservation either, and there is
+/// nothing else for the menu to carry.
 library;
 
 import 'dart:async';
@@ -48,6 +49,7 @@ import '../app/bs_epg_providers.dart';
 import '../app/cs_epg_providers.dart';
 import '../app/state.dart';
 import '../core/core.dart';
+import 'epg_menu_policy.dart';
 import 'epg_reserved.dart';
 import 'epg_screen.dart';
 import 'epg_search.dart';
@@ -272,6 +274,15 @@ class _EpgSearchScreenState extends ConsumerState<EpgSearchScreen> {
             ),
           ),
           onRecord: _recordHit,
+          onWatch: () => openLiveChannelForEpg(
+            context,
+            ref,
+            reg: widget.reg,
+            channel: hit.channel,
+          ),
+          reservedSchedule: reservedIndex.scheduleFor(hit.channel, event),
+          onDeleteReserved: (schedule) =>
+              deleteScheduleAndInvalidate(ref, widget.reg, schedule),
         );
       },
     );
@@ -280,8 +291,10 @@ class _EpgSearchScreenState extends ConsumerState<EpgSearchScreen> {
 
 /// One search result row: the tile itself, under an
 /// observing pointer listener that opens the programme's
-/// menu — 録画 — on a right click or a touch long press
-/// (owner request 2026-11-26).
+/// menu — the guide tile's menu, same items in the same
+/// words (see epg_menu_policy.dart) — on a right click or
+/// a touch long press (owner requests 2026-11-26 and
+/// 2026-11-28).
 ///
 /// The arrangement is the recorded-titles list's (see
 /// _TitleRow in titles_screen.dart): the listener only
@@ -303,6 +316,9 @@ class _SearchHitRow extends StatefulWidget {
     required this.hit,
     required this.onTap,
     required this.onRecord,
+    required this.onWatch,
+    required this.reservedSchedule,
+    required this.onDeleteReserved,
   });
 
   final EpgSearchHit hit;
@@ -314,6 +330,18 @@ class _SearchHitRow extends StatefulWidget {
   /// Reserves the row's programme: the screen's own
   /// record run (its feedback lives there).
   final void Function(EpgSearchHit hit) onRecord;
+
+  /// Opens live viewing for the row's channel (the menu's
+  /// 視聴する); offered only while the programme is on air.
+  final VoidCallback onWatch;
+
+  /// The reservation covering this row's programme, when
+  /// there is one: the menu offers 録画解除 for it instead
+  /// of 録画.
+  final RecordSchedule? reservedSchedule;
+
+  /// Deletes [reservedSchedule] on the device.
+  final Future<void> Function(RecordSchedule schedule) onDeleteReserved;
 
   @override
   State<_SearchHitRow> createState() => _SearchHitRowState();
@@ -395,39 +423,52 @@ class _SearchHitRowState extends State<_SearchHitRow> {
 
   /// The programme's menu at [position], the titles
   /// menu's shape: showMenu over a zero-size rect at the
-  /// press point. A programme that has already ended has
-  /// nothing to offer — the detail dialog offers it no
-  /// reservation either — so no menu opens, and nothing
-  /// is swallowed: a hold's tap tail goes on to open the
-  /// detail, as a plain tap does. When the menu does
-  /// open, the tap tail is swallowed first, so it cannot
-  /// open the detail over the menu.
+  /// press point, its items from epg_menu_policy — the
+  /// guide tile menu's items, in the same words. A
+  /// programme that has already ended has nothing to
+  /// offer — the detail dialog offers it no reservation
+  /// either — so no menu opens, and nothing is swallowed:
+  /// a hold's tap tail goes on to open the detail, as a
+  /// plain tap does. When the menu does open, the tap
+  /// tail is swallowed first, so it cannot open the detail
+  /// over the menu.
   Future<void> _showHitMenu(Offset position) async {
     final hit = widget.hit;
-    if (!hit.event.end.isAfter(DateTime.now())) return;
+    final actions = epgMenuActions(
+      start: hit.event.start,
+      end: hit.event.end,
+      now: DateTime.now(),
+      reserved: widget.reservedSchedule != null,
+    );
+    if (actions.isEmpty) return;
     _swallowNextTap = true;
     final overlay = Overlay.of(context).context.findRenderObject()!;
-    final chosen = await showMenu<String>(
+    final chosen = await showMenu<EpgMenuAction>(
       context: context,
       position: RelativeRect.fromRect(
         Rect.fromLTWH(position.dx, position.dy, 0, 0),
         Offset.zero & (overlay as RenderBox).size,
       ),
-      items: [
-        PopupMenuItem<String>(
-          value: 'record',
-          child: Row(
-            children: [
-              const Icon(Icons.fiber_manual_record, size: 18),
-              const SizedBox(width: 8),
-              const Text('録画'),
-            ],
-          ),
-        ),
-      ],
+      items: [for (final action in actions) epgMenuItem(action)],
     );
-    if (chosen != 'record' || !mounted) return;
-    widget.onRecord(hit);
+    if (chosen == null || !mounted) return;
+    switch (chosen) {
+      case EpgMenuAction.detail:
+        widget.onTap();
+      case EpgMenuAction.watch:
+        widget.onWatch();
+      case EpgMenuAction.record:
+        widget.onRecord(hit);
+      case EpgMenuAction.unrecord:
+        final schedule = widget.reservedSchedule;
+        if (schedule != null) {
+          await confirmAndDeleteGuideReservation(
+            context,
+            schedule: schedule,
+            onDeleteReserved: widget.onDeleteReserved,
+          );
+        }
+    }
   }
 
   void _handleTap() {

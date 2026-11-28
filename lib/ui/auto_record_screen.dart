@@ -19,6 +19,7 @@ import 'auto_record_policy.dart';
 import 'epg_genre.dart';
 import 'format.dart';
 import 'ranking_screen.dart';
+import 'tv_focus.dart';
 import 'widgets.dart';
 
 class AutoRecordScreen extends ConsumerStatefulWidget {
@@ -75,12 +76,19 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
       ),
       body: ListView(
         children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 16, 16, 0),
-            child: Text(
-              '条件に合う番組を、アプリ起動時と「今すぐチェック」で自動予約します。'
-              '上にあるルールほど優先で、時間の重なる番組は先に予約された方が残ります。'
-              'すでに始まった番組は対象外です。',
+          // TV: the intro text and the last log entry hold
+          // focus (TvFocusAnchor) so D-pad traversal can
+          // scroll this list to both ends — everything
+          // between them is buttons and tiles, but the head
+          // and the tail are display-only (plan 123's rule).
+          const TvFocusAnchor(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 0),
+              child: Text(
+                '条件に合う番組を、アプリ起動時と「今すぐチェック」で自動予約します。'
+                '上にあるルールほど優先で、時間の重なる番組は先に予約された方が残ります。'
+                'すでに始まった番組は対象外です。',
+              ),
             ),
           ),
           Padding(
@@ -197,41 +205,53 @@ class _AutoRecordScreenState extends ConsumerState<AutoRecordScreen> {
             ),
           ),
           if (log.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('まだ履歴はありません。'),
+            const TvFocusAnchor(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('まだ履歴はありません。'),
+              ),
             )
           else
-            for (final entry in log)
-              ListTile(
-                leading: Icon(switch (entry.kind) {
-                  AutoRecordLogKind.reserved => Icons.check_circle_outline,
-                  AutoRecordLogKind.conflict => Icons.event_busy,
-                  AutoRecordLogKind.error => Icons.error_outline,
-                  AutoRecordLogKind.ruleDisabled =>
-                    Icons.do_not_disturb_on_outlined,
-                  AutoRecordLogKind.auto => Icons.auto_awesome,
-                }),
-                title: Text(
-                  entry.title.isEmpty ? '（タイトルなし）' : entry.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: Text(
-                  '${switch (entry.kind) {
-                    AutoRecordLogKind.reserved => '予約しました',
-                    AutoRecordLogKind.conflict => '競合で見送り',
-                    AutoRecordLogKind.error => 'エラー',
-                    AutoRecordLogKind.ruleDisabled => '1回だけのためルールを無効化',
-                    AutoRecordLogKind.auto => '自動で予約しました',
-                  }}'
-                  ' ・ ${entry.channelName}'
-                  ' ・ ${formatDateTimeWithWeekdayJst(entry.start)}'
-                  '${entry.ruleText.isEmpty ? '' : ' ・ ${entry.ruleText}'}',
-                ),
-              ),
+            // TV: the log rows are display-only, so each
+            // one is a TvFocusAnchor traversal stop — a
+            // lazily built list only builds what traversal
+            // has scrolled into view, so the rows
+            // themselves must carry focus for the D-pad to
+            // walk the list to its end.
+            for (final entry in log) TvFocusAnchor(child: _logTile(entry)),
           const SizedBox(height: 24),
         ],
+      ),
+    );
+  }
+
+  /// One check-log row: what one check did with one
+  /// programme, in words.
+  Widget _logTile(AutoRecordLogEntry entry) {
+    return ListTile(
+      leading: Icon(switch (entry.kind) {
+        AutoRecordLogKind.reserved => Icons.check_circle_outline,
+        AutoRecordLogKind.conflict => Icons.event_busy,
+        AutoRecordLogKind.error => Icons.error_outline,
+        AutoRecordLogKind.ruleDisabled => Icons.do_not_disturb_on_outlined,
+        AutoRecordLogKind.auto => Icons.auto_awesome,
+      }),
+      title: Text(
+        entry.title.isEmpty ? '（タイトルなし）' : entry.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        '${switch (entry.kind) {
+          AutoRecordLogKind.reserved => '予約しました',
+          AutoRecordLogKind.conflict => '競合で見送り',
+          AutoRecordLogKind.error => 'エラー',
+          AutoRecordLogKind.ruleDisabled => '1回だけのためルールを無効化',
+          AutoRecordLogKind.auto => '自動で予約しました',
+        }}'
+        ' ・ ${entry.channelName}'
+        ' ・ ${formatDateTimeWithWeekdayJst(entry.start)}'
+        '${entry.ruleText.isEmpty ? '' : ' ・ ${entry.ruleText}'}',
       ),
     );
   }
@@ -413,7 +433,13 @@ class _AutoRecordRuleEditScreenState
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          TextField(
+          // AppTextField, not a plain TextField: on the TV
+          // variant a plain field opens the software
+          // keyboard on focus and traps the remote (plan
+          // 123) — the shell opens its edit dialog on OK
+          // instead. Every other form in the app already
+          // goes through it.
+          AppTextField(
             controller: _keyword,
             decoration: const InputDecoration(
               labelText: 'キーワード',
@@ -459,7 +485,7 @@ class _AutoRecordRuleEditScreenState
             onChanged: (value) => setState(() => _channel = value),
           ),
           const SizedBox(height: 16),
-          TextField(
+          AppTextField(
             controller: _exclude,
             minLines: 1,
             maxLines: 3,

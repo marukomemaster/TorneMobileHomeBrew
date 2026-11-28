@@ -44,6 +44,7 @@ class _Fake {
     bool withProgrammeAction = false,
     LiveProgrammeReservationState programmeState =
         LiveProgrammeReservationState.none,
+    String title = 'テスト番組',
   }) {
     return MaterialApp(
       home: Scaffold(
@@ -65,6 +66,7 @@ class _Fake {
           onSeek: seeks.add,
           onToggleFullscreen: () => fullscreenToggles++,
           isFullscreen: () => fullscreen,
+          title: title,
           onProgrammeAction: withProgrammeAction
               ? () => programmeActions++
               : null,
@@ -391,5 +393,44 @@ void main() {
     await tester.pump();
     expect(find.byTooltip('全画面'), findsOneWidget);
     expect(find.byTooltip('録画'), findsNothing);
+  });
+
+  group('the title at the top of the picture (owner request 2026-11-28)', () {
+    testWidgets('in fullscreen the OK key raises the title with the bar', (
+      tester,
+    ) async {
+      final fake = _Fake()..fullscreen = true;
+      await tester.pumpWidget(fake.build());
+      await tester.pump();
+
+      // The title is hidden with the controls.
+      expect(find.text('テスト番組'), findsNothing);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.select);
+      await tester.pump();
+      await tester.pump();
+
+      // The title rides at the top of the picture; the
+      // transport bar at the bottom is as before.
+      final title = find.text('テスト番組');
+      expect(title, findsOneWidget);
+      expect(tester.getRect(title).top, lessThan(80));
+      expect(find.byTooltip('再生'), findsOneWidget);
+      expect(find.byTooltip('全画面を終了'), findsOneWidget);
+    });
+
+    testWidgets('outside fullscreen the overlay stays out — the app bar '
+        'already shows the title', (tester) async {
+      final fake = _Fake();
+      await tester.pumpWidget(fake.build());
+      await tester.pump();
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.select);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('テスト番組'), findsNothing);
+      expect(find.byTooltip('再生'), findsOneWidget);
+    });
   });
 }

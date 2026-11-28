@@ -210,6 +210,7 @@ import 'player_speed_policy.dart';
 import 'player_teardown_policy.dart';
 import 'player_track_policy.dart';
 import 'player_tv_controls.dart';
+import 'player_tv_controls_policy.dart';
 import 'player_zap_policy.dart';
 import 'widgets.dart';
 
@@ -446,6 +447,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// answer pointer events only, so a remote can neither
   /// raise them nor focus their buttons.
   late final bool _tvVariant;
+
+  /// Whether this screen has already asked for the TV
+  /// variant's automatic fullscreen entry (owner request
+  /// 2026-11-28; see _tvControls): asked once, so a viewer
+  /// who leaves fullscreen by hand stays out.
+  bool _autoFullscreenRequested = false;
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   Timer? _watchdog;
 
@@ -2278,7 +2285,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// The chapter ticks the standard variant overlays on
   /// the stock seek bar are drawn by the TV seek bar
   /// itself, so no overlay joins it here.
+  ///
+  /// Playback on the TV variant opens fullscreen on its
+  /// own (owner request 2026-11-28): the first time these
+  /// controls are built, a post-frame toggle is asked for
+  /// under player_tv_controls_policy's decision, so the
+  /// viewer lands in the picture instead of on a page
+  /// around it.
   Widget _tvControls(VideoState state) {
+    if (shouldAutoEnterFullscreen(
+      tvVariant: _tvVariant,
+      alreadyFullscreen: state.isFullscreen(),
+      alreadyRequested: _autoFullscreenRequested,
+    )) {
+      _autoFullscreenRequested = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !state.isFullscreen()) {
+          state.toggleFullscreen();
+        }
+      });
+    }
     return TvVideoControls(
       playingStream: _player.stream.playing,
       positionStream: _player.stream.position,
@@ -2297,6 +2323,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       onSeek: _seekToPosition,
       onToggleFullscreen: () => state.toggleFullscreen(),
       isFullscreen: () => state.isFullscreen(),
+      title: _canZap ? widget.zapTargets![_zapIndex].name : _displayTitle,
       onProgrammeAction: _recordOffered ? _programmeAction : null,
       programmeState: _programmeState,
     );

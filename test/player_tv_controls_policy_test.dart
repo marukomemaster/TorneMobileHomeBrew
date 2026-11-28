@@ -163,4 +163,47 @@ void main() {
     expect(tvRemoteKeyActionClaims(TvRemoteKeyAction.poke), isFalse);
     expect(tvRemoteKeyActionClaims(TvRemoteKeyAction.pass), isFalse);
   });
+
+  group('automatic fullscreen entry (owner request 2026-11-28)', () {
+    test('the TV variant enters fullscreen as playback opens', () {
+      expect(
+        shouldAutoEnterFullscreen(
+          tvVariant: true,
+          alreadyFullscreen: false,
+          alreadyRequested: false,
+        ),
+        isTrue,
+      );
+    });
+
+    test('the standard variant never does', () {
+      expect(
+        shouldAutoEnterFullscreen(
+          tvVariant: false,
+          alreadyFullscreen: false,
+          alreadyRequested: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('already fullscreen, or already asked once, stays out', () {
+      expect(
+        shouldAutoEnterFullscreen(
+          tvVariant: true,
+          alreadyFullscreen: true,
+          alreadyRequested: false,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldAutoEnterFullscreen(
+          tvVariant: true,
+          alreadyFullscreen: false,
+          alreadyRequested: true,
+        ),
+        isFalse,
+      );
+    });
+  });
 }

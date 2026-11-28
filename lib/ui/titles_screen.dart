@@ -1066,12 +1066,24 @@ class _TitleRowState extends ConsumerState<_TitleRow> {
       onPointerCancel: _onRowPointerEnd,
       child: ListTile(
         selected: widget.selected,
+        // The official app's compact shape (owner request
+        // 2026-11-28): a dense row, the title held to two
+        // lines, the when-and-where to one — a long title
+        // no longer stretches its row over its neighbours.
+        dense: true,
+        visualDensity: VisualDensity.compact,
         leading: _TitleLeading(reg: widget.reg, title: t),
-        title: Text(t.title),
+        title: Text(
+          t.title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
         subtitle: Text(
           '${t.scheduledStart != null ? formatDateTimeJst(t.scheduledStart!) : ''}'
           '${t.scheduledDurationSeconds != null ? ' (${formatDurationSeconds(t.scheduledDurationSeconds!)})' : ''}'
           '${t.channelName != null ? ' ${t.channelName}' : ''}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
         ),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
@@ -1120,9 +1132,13 @@ class _TitleLeading extends ConsumerWidget {
       borderRadius: BorderRadius.circular(4),
       child: Image.memory(
         bytes,
-        width: 64,
-        height: 36,
+        width: 56,
+        height: 32,
         fit: BoxFit.cover,
+        // The 360x240 frame (plan 99) is scaled down to
+        // this box: the high-quality filter keeps the
+        // downscale smooth.
+        filterQuality: FilterQuality.high,
         errorBuilder: (_, _, _) => fallback,
       ),
     );
@@ -1131,16 +1147,25 @@ class _TitleLeading extends ConsumerWidget {
 
 /// The detail view's thumbnail banner (plan 86.6): a 16:9
 /// picture above the title when the unit provides one, and
-/// nothing at all when it does not (no empty box). On the TV
-/// variant the banner's height is capped (see build): at TV
-/// widths a full 16:9 banner is taller than the screen and
-/// pushes everything, the play button included, below the
-/// fold.
+/// nothing at all when it does not (no empty box). On the
+/// TV variant the banner is width-capped and centred (see
+/// build): the unit's thumbnail frames are 360x240 and no
+/// larger source exists, so a TV-width banner only
+/// stretches blocks.
 class _TitleThumbnailBanner extends ConsumerWidget {
   const _TitleThumbnailBanner({required this.reg, required this.titleId});
 
   final RegisteredNasne reg;
   final String titleId;
+
+  /// The TV banner's width cap. The thumbnail's source
+  /// frame is 360 px wide (plan 99), so the cap is a
+  /// stretch budget, not a layout choice: at the former
+  /// full width (1888 px at 1080p) the frame stretched
+  /// past 5x and read as blocks; at 600 px the stretch is
+  /// about 1.7x, which the high-quality filter keeps
+  /// smooth. Smoothness wins over size (owner, 2026-11-28).
+  static const double _tvMaxWidth = 600;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1151,26 +1176,35 @@ class _TitleThumbnailBanner extends ConsumerWidget {
     final image = Image.memory(
       bytes,
       fit: BoxFit.cover,
+      // The frame is always scaled (down in lists, up in
+      // this banner): the high-quality filter keeps both
+      // directions smooth.
+      filterQuality: FilterQuality.high,
       errorBuilder: (_, _, _) => const SizedBox.shrink(),
     );
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        // TV: at full width the 16:9 banner is taller than the
-        // whole screen (at 1080p the list is 1888 wide, so the
-        // banner alone is 1062 tall), and the title, the fields
-        // and the play button all start below the fold — the
-        // thumbnail is literally in the way of playback. Cap
-        // the banner at 40% of the screen height (the frame is
-        // centre-cropped by BoxFit.cover) so the play button
-        // sits on the first screen. The standard variant keeps
-        // the exact 16:9 banner it has always had.
+        // TV: the banner is capped twice over. Its width is
+        // held to [_tvMaxWidth] and centred, so the 360x240
+        // frame is not stretched across the whole TV (see
+        // the constant). Its height is held to 40% of the
+        // screen height, as before: at 16:9 the width cap
+        // alone gives a 338-tall banner, inside the cap at
+        // 1080p, but on a shorter screen the height cap is
+        // what keeps the title, the fields and the play
+        // button on the first screen. The standard variant
+        // keeps the exact 16:9 banner it has always had.
         child: ref.watch(appVariantProvider).isTv
-            ? SizedBox(
-                height: MediaQuery.sizeOf(context).height * 0.4,
-                width: double.infinity,
-                child: image,
+            ? Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: _tvMaxWidth,
+                    maxHeight: MediaQuery.sizeOf(context).height * 0.4,
+                  ),
+                  child: AspectRatio(aspectRatio: 16 / 9, child: image),
+                ),
               )
             : AspectRatio(aspectRatio: 16 / 9, child: image),
       ),
